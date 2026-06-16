@@ -56,7 +56,7 @@ def dense_eval(sess, in_name, H, targets, ref_argmax, chunk=200):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--src", default=DEFAULT_SRC, help="base dir; variants are <src>_<variant>")
+    ap.add_argument("--src", default=DEFAULT_SRC, help="model root dir; variants are <src>/<variant>")
     ap.add_argument("--npz", default="artifacts/clusters.npz")
     ap.add_argument("--head", default="artifacts/head_W.npy")
     ap.add_argument("--model", default="Qwen/Qwen3-0.6B")
@@ -75,7 +75,7 @@ def main():
 
     logger.info(f"  {'head':14s}{'top-1 agree':>14}{'PPL':>10}")
     for v in VARIANTS:
-        d = f"{a.src}_{v}"
+        d = f"{a.src}/{v}"
         if not Path(f"{d}/model.onnx").exists():
             logger.warning(f"  {v:14s}  (missing — build with turbohead-quantize-head)")
             continue

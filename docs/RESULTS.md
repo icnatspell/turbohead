@@ -5,16 +5,18 @@ One section per model; add new models by appending a section in the same shape.
 
 ## Reproduce a model from scratch
 
-One command builds every artifact for a model into `artifacts/<slug>*` (genai int4 baseline → head
-weight → clusters → 4 dense-head variants → 2 flash splices), then prints the bench/eval commands:
+One command builds every artifact for a model into its own `artifacts/<slug>/` dir (genai int4
+baseline → head weight → clusters → 4 dense-head variants → 2 flash splices), then prints the
+bench/eval commands:
 
 ```bash
 bash turbohead/surgery/build_all.sh <hf-model> <slug> [cap=16] [P=256]
 ```
 
-`<slug>` is a dir-safe name; artifacts land at `artifacts/<slug>` (baseline), `<slug>_head_W.npy`,
-`<slug>_clusters.npz`, `<slug>_head{16,8g128,4g128,4g32}`, `<slug>_onnx`, `<slug>_fused`. Re-running
-skips the slow genai baseline unless `FORCE=1`. Per-model command blocks are listed in each section.
+`<slug>` is a dir-safe name; everything for the model lives under `artifacts/<slug>/`:
+`baseline/`, `head_W.npy`, `clusters.npz`, `head{16,8g128,4g128,4g32}/`, `onnx/`, `fused/` — nothing
+shared between models, so each is independently reusable. Re-running skips the slow genai baseline
+unless `FORCE=1`. Per-model command blocks are listed in each section.
 
 ## Method
 
@@ -40,11 +42,11 @@ V=151936, D=1024, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp
 ```bash
 bash turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b
 R=artifacts/qwen3_0_6b
-uv run turbohead-bench ${R}_head16 ${R}_head8g128 ${R}_head4g128 ${R}_head4g32 ${R}_onnx ${R}_fused \
-    --threads 1,2,4,8 --reps 7                         # greedy
-uv run turbohead-bench ${R}_head16 ${R}_head8g128 ${R}_head4g128 ${R}_head4g32 ${R}_onnx ${R}_fused \
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7                              # greedy
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
-uv run turbohead-head-quality --src ${R} --npz ${R}_clusters.npz --head ${R}_head_W.npy -P 256
+uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.npy -P 256
 ```
 
 ### Quality (vs fp32 head, 1999 WikiText-2 positions)
