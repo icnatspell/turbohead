@@ -59,19 +59,23 @@ def main():
     ap.add_argument("--src", default=DEFAULT_SRC, help="model root dir; variants are <src>/<variant>")
     ap.add_argument("--npz", default="artifacts/clusters.npz")
     ap.add_argument("--head", default="artifacts/head_W.npy")
-    ap.add_argument("--model", default="Qwen/Qwen3-0.6B")
+    ap.add_argument("--model", default=None,
+                    help="HF id for the source hidden states (default: read <src>/hf_model_id.txt)")
     ap.add_argument("--max-tokens", type=int, default=2000)
     ap.add_argument("-P", "--probes", type=int, default=256)
     a = ap.parse_args()
 
+    # The HF model supplies the real lm_head-input hidden states; it MUST match this artifact's
+    # dims. build_all records the id in the artifact dir so the eval is self-describing.
+    model_id = a.model or Path(f"{a.src}/hf_model_id.txt").read_text().strip()
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(a.model)
-    model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.float32)
+    tok = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.float32)
     H, targets = collect(model, tok, wikitext(), a.max_tokens)   # H:(T,D)  targets:(T,) next ids
     W = np.load(a.head).astype(np.float32)                       # (V,D) true fp32 head
     ref_argmax = (H @ W.T).argmax(-1)                            # fp32 greedy reference
-    logger.info(f"{len(H)} WikiText-2 positions | reference = fp32 head_W")
+    logger.info(f"{len(H)} WikiText-2 positions | {model_id} | reference = fp32 head_W")
 
     logger.info(f"  {'head':14s}{'top-1 agree':>14}{'PPL':>10}")
     for v in VARIANTS:

@@ -26,6 +26,7 @@ mkdir -p "$LOGS"
 exec > >(tee "$LOGS/build.log") 2>&1   # keep the full build log with the artifacts
 
 echo "== build_all: $MODEL -> $ROOT/ (cap=$CAP P=$P) =="
+echo "$MODEL" > "$ROOT/hf_model_id.txt"   # makes the artifact dir self-describing (head_quality reads it)
 
 [ -f csrc/libturbohead.so ] || bash csrc/build.sh           # fused-op kernel (one-time)
 
