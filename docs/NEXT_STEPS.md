@@ -3,6 +3,35 @@
 Status as of this revision. Target: `Qwen/Qwen3-0.6B`, INT4 body / INT8 head, **CPU only**.
 Full spec in `PLAN.md`; reproduction in `../README.md`.
 
+## Head-precision comparison (2026-06-16, Qwen3-0.6B, int4 body)
+
+**Is FlashHead worth it vs just int4-ing the dense head?** Yes — FlashHead is faster than *every*
+dense quant head and matches int8 quality on greedy. Reproduce: `turbohead-bench` (speed,
+median±std over 7 reps, each model in its own process) + `turbohead-head-quality` (agreement+PPL on
+1999 WikiText-2 positions, vs the fp32 head). All speedups are **vs the fp32-equivalent `head16`**.
+
+Decode tok/s (median±std), greedy / sampling@temp0.8, and head quality:
+
+| head | 1t greedy | 4t greedy | 1t sample | top-1 agree | PPL |
+|---|---|---|---|---|---|
+| head16 (fp32-eq, ref) | 22.1 (1.00×) | 34.8 | 21.3 | 100.0% | 13.518 |
+| head8 g128 | 38.7 (1.75×) | 61.9 | 36.0 | **98.5%** | 13.520 |
+| head4 g128 | 45.2 (2.05×) | 73.5 | 41.3 | 90.9% | 13.871 |
+| head4 g32 | 42.4 (1.92×) | 69.4 | 39.7 | 93.2% | 13.562 |
+| flash onnx (contract A) | 47.8 (2.17×) | 75.3 | 46.8 | 97.6% | 121.9† |
+| **flash fused (contract H)** | **53.1 (2.40×)** | **82.4** | **52.2** | 97.6% | 121.9† |
+
+† Flash full-distribution PPL is **coverage-limited** (88.5% of targets in the probed set at P=256;
+uncovered → floored). *Covered* PPL = 6.356 — ranking is excellent where the target is probed. So
+flash is great for greedy/sampling-over-shortlist; for full-vocab likelihood, raise P or use head8.
+
+Takeaways: (1) **fused contract-H is the fastest path, period** (2.40× @1t, beating int4-g128's
+2.05×) and the gap is robust across 1/2/4/8 threads. (2) **head8 g128 is the dense sweet spot** —
+98.5% agreement, PPL identical to fp32, 1.75×. (3) Among int4 dense heads, **g128 is faster but
+g32 is more accurate** (more scales = more dequant = slower, better quality). (4) Sampling doesn't
+widen the flash lead as much as expected here because dense quant heads are already fast enough that
+the full-V softmax (~2ms) is a smaller relative share than vs the slow fp32 head.
+
 ## What works
 
 End-to-end pipeline is implemented, reproducible, and correct:
