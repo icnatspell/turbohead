@@ -1,0 +1,52 @@
+[project]
+name = "turbohead"
+version = "0.1.0"
+description = "Approximate clustering LM head (FlashHead) spliced into quantized ONNX models, with a raw-onnxruntime decode loop."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+# Runtime (turbohead/inference) — minimal: ORT + numpy + a tokenizer. No torch/onnx/genai.
+dependencies = [
+    "loguru>=0.7.3",
+    "numpy>=2.4.6",
+    "onnxruntime>=1.26.0",
+    "transformers>=5.12.1",
+]
+
+# `uv run turbohead-<x>` instead of `uv run python turbohead/.../<x>.py`.
+# surgery/* + agreement need the surgery/eval extras (installed by `uv sync`); decode is runtime-only.
+[project.scripts]
+turbohead-decode = "turbohead.inference.decode_loop:main"
+turbohead-extract-head = "turbohead.surgery.extract_head:main"
+turbohead-build-clusters = "turbohead.surgery.build_clusters:main"
+turbohead-build-subgraph = "turbohead.surgery.build_subgraph:main"
+turbohead-splice = "turbohead.surgery.splice:main"
+turbohead-agreement = "turbohead.eval.agreement:main"
+
+[project.optional-dependencies]
+# Apply the method (turbohead/surgery): cluster + graph surgery + baseline builder.
+surgery = [
+    "onnx>=1.22.0",
+    "onnx-ir>=0.2.1",
+    "onnxruntime-genai>=0.14.1",
+    "safetensors>=0.8.0",
+    "torch>=2.12.0",
+]
+# Quality/speed gates (turbohead/eval).
+eval = ["datasets>=5.0.0", "torch>=2.12.0"]
+
+[dependency-groups]
+dev = [
+    "turbohead[surgery,eval]",   # devs get everything; `pip install turbohead` stays runtime-only
+    "pyrefly>=1.0.0",
+    "ruff>=0.15.17",
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["turbohead"]

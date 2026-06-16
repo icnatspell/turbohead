@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+dist/
+wheels/
+*.egg-info
+.ruff_cache/
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Generated model / data artifacts (reproduced by the pipeline, not committed)
+artifacts/
+*.onnx
+*.onnx.data
+*.npz
+*.npy
+*.log
