@@ -31,13 +31,12 @@ loop, and the quality/speed gates. Full design notes in `docs/PLAN.md`; findings
 ## Install
 
 ```bash
-uv sync                                  # dev: runtime + surgery + eval extras + console scripts
-# deploy only (decode loop): pip install turbohead
-# apply the method:          pip install "turbohead[surgery]"
+uv sync          # everything: surgery, the decode loop, and the quality/speed gates
+# or:  pip install turbohead
 ```
 
-The **runtime** is intentionally tiny — `onnxruntime + numpy + a tokenizer`, no torch/genai. The
-**surgery** and **eval** extras pull torch/onnx/datasets and are only needed offline.
+This installs the full toolkit (onnx/torch/datasets included) — you apply the method *and* run/
+evaluate it from one install. The `dev` group adds ruff/pytest/pyrefly for contributors.
 
 ## Usage
 

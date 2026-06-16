@@ -6,16 +6,22 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
-# Runtime (turbohead/inference) — minimal: ORT + numpy + a tokenizer. No torch/onnx/genai.
 dependencies = [
+    # inference runtime (turbohead/inference)
     "loguru>=0.7.3",
     "numpy>=2.4.6",
     "onnxruntime>=1.26.0",
     "transformers>=5.12.1",
+    # surgery + eval (turbohead/surgery, turbohead/eval): apply the method, measure quality
+    "onnx>=1.22.0",
+    "onnx-ir>=0.2.1",
+    "onnxruntime-genai>=0.14.1",
+    "safetensors>=0.8.0",
+    "torch>=2.12.0",
+    "datasets>=5.0.0",
 ]
 
 # `uv run turbohead-<x>` instead of `uv run python turbohead/.../<x>.py`.
-# surgery/* + agreement need the surgery/eval extras (installed by `uv sync`); decode is runtime-only.
 [project.scripts]
 turbohead-decode = "turbohead.inference.decode_loop:main"
 turbohead-extract-head = "turbohead.surgery.extract_head:main"
@@ -25,21 +31,8 @@ turbohead-splice = "turbohead.surgery.splice:main"
 turbohead-agreement = "turbohead.eval.agreement:main"
 turbohead-ppl = "turbohead.eval.ppl:main"
 
-[project.optional-dependencies]
-# Apply the method (turbohead/surgery): cluster + graph surgery + baseline builder.
-surgery = [
-    "onnx>=1.22.0",
-    "onnx-ir>=0.2.1",
-    "onnxruntime-genai>=0.14.1",
-    "safetensors>=0.8.0",
-    "torch>=2.12.0",
-]
-# Quality/speed gates (turbohead/eval).
-eval = ["datasets>=5.0.0", "torch>=2.12.0"]
-
 [dependency-groups]
-dev = [
-    "turbohead[surgery,eval]",   # devs get everything; `pip install turbohead` stays runtime-only
+dev = [    # tooling only; everything functional is a required dependency above
     "pyrefly>=1.0.0",
     "ruff>=0.15.17",
     "pytest>=8.0.0",

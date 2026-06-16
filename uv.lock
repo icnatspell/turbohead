@@ -1662,23 +1662,16 @@ name = "turbohead"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "datasets" },
     { name = "loguru" },
     { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "transformers" },
-]
-
-[package.optional-dependencies]
-eval = [
-    { name = "datasets" },
-    { name = "torch" },
-]
-surgery = [
     { name = "onnx" },
     { name = "onnx-ir" },
+    { name = "onnxruntime" },
     { name = "onnxruntime-genai" },
     { name = "safetensors" },
     { name = "torch" },
+    { name = "transformers" },
 ]
 
 [package.dev-dependencies]
@@ -1686,31 +1679,27 @@ dev = [
     { name = "pyrefly" },
     { name = "pytest" },
     { name = "ruff" },
-    { name = "turbohead", extra = ["eval", "surgery"] },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "datasets", marker = "extra == 'eval'", specifier = ">=5.0.0" },
+    { name = "datasets", specifier = ">=5.0.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy", specifier = ">=2.4.6" },
-    { name = "onnx", marker = "extra == 'surgery'", specifier = ">=1.22.0" },
-    { name = "onnx-ir", marker = "extra == 'surgery'", specifier = ">=0.2.1" },
+    { name = "onnx", specifier = ">=1.22.0" },
+    { name = "onnx-ir", specifier = ">=0.2.1" },
     { name = "onnxruntime", specifier = ">=1.26.0" },
-    { name = "onnxruntime-genai", marker = "extra == 'surgery'", specifier = ">=0.14.1" },
-    { name = "safetensors", marker = "extra == 'surgery'", specifier = ">=0.8.0" },
-    { name = "torch", marker = "extra == 'eval'", specifier = ">=2.12.0" },
-    { name = "torch", marker = "extra == 'surgery'", specifier = ">=2.12.0" },
+    { name = "onnxruntime-genai", specifier = ">=0.14.1" },
+    { name = "safetensors", specifier = ">=0.8.0" },
+    { name = "torch", specifier = ">=2.12.0" },
     { name = "transformers", specifier = ">=5.12.1" },
 ]
-provides-extras = ["surgery", "eval"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pyrefly", specifier = ">=1.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "ruff", specifier = ">=0.15.17" },
-    { name = "turbohead", extras = ["surgery", "eval"] },
 ]
 
 [[package]]
