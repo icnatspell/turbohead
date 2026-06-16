@@ -33,7 +33,7 @@ def _nbits(model, bits, block_size, node_name):
     return q.model.model
 
 
-def quantize_head(src=DEFAULT_SRC, dst=None, bits=4, group_size=128):
+def quantize_head(src=DEFAULT_SRC, dst=None, bits=4, group_size=128, head=HEAD_W):
     if bits not in (16, 8, 4):
         raise ValueError(f"bits must be 16, 8 or 4, got {bits}")
     dst = dst or f"{src}_head{bits}" + (f"g{group_size}" if bits < 16 else "")
@@ -44,10 +44,10 @@ def quantize_head(src=DEFAULT_SRC, dst=None, bits=4, group_size=128):
 
     m = onnx.load(f"{src}/model.onnx")
     g = m.graph
-    head, hidden3d = find_head(g)  # (1, seq, D)
-    g.node.remove(head)  # old quantized head weight initializer stays (tied embed uses it)
+    head_node, hidden3d = find_head(g)  # (1, seq, D)
+    g.node.remove(head_node)  # old quantized head weight initializer stays (tied embed uses it)
 
-    Wt = np.load(HEAD_W).T  # (D, V) for hidden @ W -> logits
+    Wt = np.load(head).T  # (D, V) for hidden @ W -> logits
     if bits == 16:
         g.initializer.append(numpy_helper.from_array(Wt.astype(np.float16), "lm_head_W16"))
         g.node.append(helper.make_node("Cast", ["lm_head_W16"], ["lm_head_Wf"], to=TensorProto.FLOAT))
@@ -69,10 +69,11 @@ def main():
     ap = argparse.ArgumentParser(description="Build a dense-LM-head baseline at a chosen precision")
     ap.add_argument("--src", default=DEFAULT_SRC, help="baseline genai ONNX dir")
     ap.add_argument("--dst", default=None, help="output dir (default: <src>_head<bits>[g<group>])")
+    ap.add_argument("--head", default=HEAD_W, help="fp32 head_W.npy for this model")
     ap.add_argument("--bits", type=int, default=4, choices=[16, 8, 4])
     ap.add_argument("--group-size", type=int, default=128, help="MatMulNBits group size (8/4-bit)")
     a = ap.parse_args()
-    quantize_head(a.src, a.dst, a.bits, a.group_size)
+    quantize_head(a.src, a.dst, a.bits, a.group_size, a.head)
 
 
 if __name__ == "__main__":

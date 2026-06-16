@@ -3,6 +3,19 @@
 Per-model head-precision comparison: **is FlashHead worth it vs just quantizing the dense head?**
 One section per model; add new models by appending a section in the same shape.
 
+## Reproduce a model from scratch
+
+One command builds every artifact for a model into `artifacts/<slug>*` (genai int4 baseline → head
+weight → clusters → 4 dense-head variants → 2 flash splices), then prints the bench/eval commands:
+
+```bash
+bash turbohead/surgery/build_all.sh <hf-model> <slug> [cap=16] [P=256]
+```
+
+`<slug>` is a dir-safe name; artifacts land at `artifacts/<slug>` (baseline), `<slug>_head_W.npy`,
+`<slug>_clusters.npz`, `<slug>_head{16,8g128,4g128,4g32}`, `<slug>_onnx`, `<slug>_fused`. Re-running
+skips the slow genai baseline unless `FORCE=1`. Per-model command blocks are listed in each section.
+
 ## Method
 
 - **Speed** (`turbohead-bench`): decode tok/s, median ± std over 7 reps (+1 warmup), each model in
@@ -23,6 +36,16 @@ One section per model; add new models by appending a section in the same shape.
 ## Qwen3-0.6B (int4 body) — 2026-06-16
 
 V=151936, D=1024, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 13.518.
+
+```bash
+bash turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b
+R=artifacts/qwen3_0_6b
+uv run turbohead-bench ${R}_head16 ${R}_head8g128 ${R}_head4g128 ${R}_head4g32 ${R}_onnx ${R}_fused \
+    --threads 1,2,4,8 --reps 7                         # greedy
+uv run turbohead-bench ${R}_head16 ${R}_head8g128 ${R}_head4g128 ${R}_head4g32 ${R}_onnx ${R}_fused \
+    --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
+uv run turbohead-head-quality --src ${R} --npz ${R}_clusters.npz --head ${R}_head_W.npy -P 256
+```
 
 ### Quality (vs fp32 head, 1999 WikiText-2 positions)
 
@@ -77,6 +100,18 @@ but weak for full-vocab likelihood — raise P, or use a dense head, if you need
 
 ## Models pending
 
-Same matrix to run next (need int4 baseline + clusters built first):
-Gemma3-270M, Gemma3-1B, Llama-3.2-1B, Qwen3-1.7B, Qwen3.5-0.8B, LFM2.5-350M. FlashHead's edge should
+Each is one `build_all.sh <hf-model> <slug>` then the three commands above. FlashHead's edge should
 grow where the head is a larger share of decode (bigger V:D, fewer layers).
+
+| model | hf id | slug |
+|---|---|---|
+| Gemma3-270M | `google/gemma-3-270m` | `gemma3_270m` |
+| Gemma3-1B | `google/gemma-3-1b-pt` | `gemma3_1b` |
+| Llama-3.2-1B | `meta-llama/Llama-3.2-1B` | `llama3_2_1b` |
+| Qwen3-1.7B | `Qwen/Qwen3-1.7B` | `qwen3_1_7b` |
+| Qwen3.5-0.8B | `Qwen/Qwen3.5-0.8B` | `qwen3_5_0_8b` |
+| LFM2.5-350M | `LiquidAI/LFM2.5-350M` | `lfm2_5_350m` |
+| h2o-danube3-500m-chat | `h2oai/h2o-danube3-500m-chat` | `danube3_500m` |
+
+(cap must divide V; if `cap=16` doesn't, `build_all` fails at clustering — pick a divisor of that
+model's vocab via the `[cap]` arg. block_size 128 must divide D.)

@@ -53,21 +53,23 @@ def read_eos(src):
     return sorted({*(eos if isinstance(eos, list) else [eos])})
 
 
-def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", block_size=128):
-    """Splice the flash head into `src` -> `dst` using `backend` ('fused' or 'onnx')."""
+def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", block_size=128,
+           npz=CLUSTERS, head=HEAD_W):
+    """Splice the flash head into `src` -> `dst` using `backend` ('fused' or 'onnx').
+    `npz`/`head` are the clustering assets for this model (default the Qwen3-0.6B paths)."""
     if backend not in DST_SUFFIX:
         raise ValueError(f"backend must be 'fused' or 'onnx', got {backend!r}")
     dst = dst or f"{src}{DST_SUFFIX[backend]}"
     if backend == "fused" and not Path(OP_LIB).exists():
         raise FileNotFoundError(f"{OP_LIB} not built — run `bash csrc/build.sh` first")
 
-    z = np.load(CLUSTERS)
+    z = np.load(npz)
     Cnorm, Wperm, Vmap = z["Cnorm"], z["Wperm"], z["Vmap"]
     K, cap, D = Wperm.shape
     V = K * cap
     special_ids = np.asarray(read_eos(src), np.int64)
     N = P * cap + len(special_ids)
-    Wspec = np.load(HEAD_W)[special_ids]  # (S,D) fp32; stage-2 builders cast as needed
+    Wspec = np.load(head)[special_ids]  # (S,D) fp32; stage-2 builders cast as needed
 
     Path(dst).mkdir(parents=True, exist_ok=True)
     for f in ("genai_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
@@ -127,13 +129,15 @@ def main():
     ap.add_argument("--backend", default="fused", choices=["fused", "onnx"],
                     help="fused = custom-op shortlist (contract H, fastest); onnx = portable (1,V) logits (contract A)")
     ap.add_argument("--src", default=DEFAULT_SRC, help="baseline genai ONNX dir")
-    ap.add_argument("--dst", default=None, help="output dir (default: <src><_flash_fused|_flash>)")
+    ap.add_argument("--dst", default=None, help="output dir (default: <src><_fused|_onnx>)")
+    ap.add_argument("--npz", default=CLUSTERS, help="clusters .npz for this model")
+    ap.add_argument("--head", default=HEAD_W, help="fp32 head_W.npy for this model")
     ap.add_argument("-P", "--probes", type=int, default=256)
     ap.add_argument("--stage1", default="int4", choices=["fp16", "int8", "int4"],
                     help="stage-1 centroid-scoring precision (int4 default, fastest)")
     ap.add_argument("--block-size", type=int, default=128, help="MatMulNBits quant group size")
     a = ap.parse_args()
-    splice(a.src, a.dst, a.backend, a.probes, a.stage1, a.block_size)
+    splice(a.src, a.dst, a.backend, a.probes, a.stage1, a.block_size, a.npz, a.head)
 
 
 if __name__ == "__main__":

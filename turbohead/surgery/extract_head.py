@@ -16,10 +16,10 @@ def main():
     ap.add_argument("--model", default=MODEL)
     a = ap.parse_args()
     m = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16)
-    W = m.get_input_embeddings().weight  # tied with lm_head
-    assert m.lm_head.weight.data_ptr() == W.data_ptr(), "expected tied embeddings"
+    W = m.lm_head.weight  # the actual head; == embed_tokens.weight when tied
+    tied = m.lm_head.weight.data_ptr() == m.get_input_embeddings().weight.data_ptr()
     np.save(a.out, W.detach().float().numpy())  # (V, D) fp32
-    logger.info(f"saved {a.out}  shape {tuple(W.shape)}")
+    logger.info(f"saved {a.out}  shape {tuple(W.shape)}  ({'tied' if tied else 'untied'} embeddings)")
 
 
 if __name__ == "__main__":
