@@ -113,3 +113,12 @@ For a CPU custom op via `SessionOptions.register_custom_ops_library` (see `csrc/
   ordering otherwise forces a scalar loop (~2× slower). Build `-O3 -march=native -ffast-math`.
 - A custom op can take large initializers (e.g. the full weight matrix) as inputs **by reference** —
   ORT passes a pointer, no copy. This is what lets the fused kernel read only the gathered rows.
+- **Loading two different custom-op `.so` files that register the same domain in one process
+  segfaults** (exit 139). Hit when A/B-testing two kernel builds (fast vs no-fast-math) in one
+  script. Run each model/.so in its **own process** and compare dumped outputs. (Single-model
+  usage — even alongside non-custom-op models — is fine.)
+- **Teacher-forced vs free-running agreement are different metrics.** Per-position agreement with
+  identical fed hidden states (eval/agreement.py: 97.6%) is NOT comparable to free-running greedy
+  generation (~62% same-position token match over 128 tokens): one early disagreement forks the
+  whole trajectory. To validate a kernel reproduces a reference, compare both *free-running* on the
+  same prompts (fused vs contract-A = 100%); don't read free-running-vs-baseline as a quality drop.
