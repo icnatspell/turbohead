@@ -1,12 +1,14 @@
-"""Prototype: contract-B fused splice (greedy only).
+"""Fused splice (contract H — candidate shortlist out).
 
 Stage-1 (int4 centroid scoring + TopK) stays in the graph; the whole of stage-2
-(gather candidate rows -> dot with h -> argmax incl. specials) collapses into one
-`turbohead.FlashHeadGreedy` custom op. The graph emits the next-token id directly
-(contract B): no (P*cap,D) materialization, no (1,V) logits, no ScatterElements.
+(gather candidate rows -> dot with h) collapses into one `turbohead.FlashHeadSelect`
+custom op. The graph emits the candidate shortlist `cand_logits (1,N)` + `cand_ids
+(1,N)` — no (P*cap,D) materialization, no (1,V) logits, no ScatterElements. The decode
+loop does greedy (argmax) or sampling (softmax) over the shortlist, so temperature>0
+works without ever forming the full vocab vector.
 
-Needs csrc/libturbohead.so (build: see csrc/turbohead_op.cc). The .so is copied into
-the model dir; the decode loop auto-registers it. Greedy only — no sampling logits.
+Needs csrc/libturbohead.so (build: bash csrc/build.sh). The .so is copied into the
+model dir; the decode loop auto-registers it.
 Usage: `uv run python -m turbohead.surgery.splice_fused [-P 256]`.
 """
 
@@ -29,6 +31,8 @@ def splice_fused(P, special_ids, block_size=128):
     z = np.load("artifacts/clusters.npz")
     Cnorm, Wperm, Vmap = z["Cnorm"], z["Wperm"], z["Vmap"]
     K, cap, D = Wperm.shape
+    S = len(special_ids)
+    N = P * cap + S
     Wspec = np.load("artifacts/head_W.npy")[special_ids].astype(np.float32)
 
     Path(DST).mkdir(exist_ok=True)
@@ -47,9 +51,9 @@ def splice_fused(P, special_ids, block_size=128):
         helper.make_node("MatMul", ["fh_hlast", "fh_Cnorm"], ["fh_sims"], name="fh_sims_mm"),  # ->MatMulNBits
         helper.make_node("TopK", ["fh_sims", "fh_Pk"], ["fh_tv", "fh_ti"], axis=1, sorted=0),
         helper.make_node("Squeeze", ["fh_ti", "fh_ax0"], ["fh_ti1"]),  # (1,P)->(P,)
-        helper.make_node("FlashHeadGreedy",
+        helper.make_node("FlashHeadSelect",
                          ["fh_hlast", "fh_ti1", "fh_Wperm", "fh_Vmap", "fh_Wspec", "fh_spec"],
-                         ["next_token"], domain="turbohead"),
+                         ["cand_logits", "cand_ids"], domain="turbohead"),
     ]
     inits = [
         numpy_helper.from_array(Cnorm.astype(np.float32), "fh_Cnorm"),
@@ -64,11 +68,12 @@ def splice_fused(P, special_ids, block_size=128):
     g.node.extend(nodes)
     g.initializer.extend(inits)
 
-    # contract B: drop the `logits` output, keep present.* KV, emit next_token (1,1) int64
+    # contract H: drop the `logits` output, keep present.* KV, emit the shortlist
     kept = [o for o in g.output if o.name != "logits"]
     del g.output[:]
     g.output.extend(kept)
-    g.output.append(helper.make_tensor_value_info("next_token", TensorProto.INT64, [1, 1]))
+    g.output.append(helper.make_tensor_value_info("cand_logits", TensorProto.FLOAT, [1, N]))
+    g.output.append(helper.make_tensor_value_info("cand_ids", TensorProto.INT64, [1, N]))
     m.opset_import.append(helper.make_opsetid("turbohead", 1))
 
     m = quantize_stage1(m, "int4", block_size)  # fh_sims_mm -> MatMulNBits
@@ -76,11 +81,11 @@ def splice_fused(P, special_ids, block_size=128):
     for f in ("model.onnx", "model.onnx.data"):
         Path(f"{DST}/{f}").unlink(missing_ok=True)
     onnx.save(m, f"{DST}/model.onnx", save_as_external_data=True, location="model.onnx.data")
-    logger.info(f"fused -> {DST}/model.onnx  (P={P}, contract B, greedy)")
+    logger.info(f"fused -> {DST}/model.onnx  (P={P}, contract H, shortlist N={N})")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Contract-B fused splice (greedy prototype)")
+    ap = argparse.ArgumentParser(description="Fused splice (contract H — shortlist out)")
     ap.add_argument("-P", "--probes", type=int, default=256)
     ap.add_argument("--block-size", type=int, default=128)
     a = ap.parse_args()

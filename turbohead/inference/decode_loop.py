@@ -55,12 +55,15 @@ class Decoder:
 
     def __init__(self, model_dir, threads=1, profile=False):
         self.dir = model_dir.rstrip("/")
+        # match the fused kernel's OpenMP threads to ORT intra-op (read by libgomp at
+        # first parallel region; set before the lib runs). Per-process, fine for serving.
+        os.environ["OMP_NUM_THREADS"] = str(threads)
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
         if profile:
             so.enable_profiling = True
             so.profile_file_prefix = f"{self.dir}/ortprof"
-        lib = f"{self.dir}/libturbohead.so"  # fused contract-B model ships its custom-op kernel here
+        lib = f"{self.dir}/libturbohead.so"  # fused model ships its custom-op kernel here
         if os.path.exists(lib):
             so.register_custom_ops_library(lib)
         self.sess = ort.InferenceSession(f"{self.dir}/model.onnx", so,
@@ -84,10 +87,13 @@ class Decoder:
         self.present_names = [f"present.{i}.{kv}"
                               for i in range(self.n_layers) for kv in ("key", "value")]
 
-        # Contract: A emits `logits`, B emits the token id directly.
-        self.contract = "A" if "logits" in self.out_names else "B"
-        self.token_out = "logits" if self.contract == "A" \
-            else next(n for n in self.out_names if not n.startswith("present."))
+        # Contract: A emits full `logits` (1,V); H emits the candidate shortlist
+        # (cand_logits, cand_ids) from the fused op; B emits the token id directly.
+        self.contract = ("A" if "logits" in self.out_names
+                         else "H" if "cand_logits" in self.out_names else "B")
+        self.token_out = ("logits" if self.contract == "A"
+                          else None if self.contract == "H"
+                          else next(n for n in self.out_names if not n.startswith("present.")))
 
     def _empty_past(self):
         z = np.zeros((1, self.kv_heads, 0, self.head_size), np.float32)
@@ -98,26 +104,34 @@ class Decoder:
                       self.sess.run(None, {"input_ids": input_ids,
                                            "attention_mask": attn, **past})))
         past = {p: od[pr] for p, pr in zip(self.kv_names, self.present_names)}
-        return past, od[self.token_out]   # raw: logits (A) or token id (B)
+        return past, od
 
-    def _select(self, raw, temperature, rng):
-        """temp=0 -> argmax. temp>0 -> probed-softmax sampling: softmax/multinomial over ONLY
-        the scored candidates (the (1,V) head fills non-candidates with -1e9), skipping the
-        ~2ms full-vocab softmax the dense head pays. Contract B is greedy-only (no logits)."""
+    @staticmethod
+    def _pick(logits, ids, temperature, rng):
+        """Greedy (argmax) or temperature sampling over a candidate (logits, ids) shortlist."""
+        if not temperature:
+            return int(ids[logits.argmax()])
+        x = logits.astype(np.float32) / temperature
+        x -= x.max()
+        p = np.exp(x)
+        p /= p.sum()
+        return int(ids[rng.choice(ids.size, p=p)])
+
+    def _select(self, od, temperature, rng):
+        """Pick the next token. H: argmax/sample over the fused op's shortlist. A: same,
+        but the candidate set is the (1,V) entries above the -1e9 fill (skips full-vocab
+        softmax). B: token-out, greedy only."""
+        if self.contract == "H":
+            return self._pick(od["cand_logits"].reshape(-1), od["cand_ids"].reshape(-1),
+                              temperature, rng)
         if self.contract == "B":
             if temperature:
                 raise ValueError("temperature>0 needs logits; this graph is token-out (contract B)")
-            return int(np.asarray(raw).flat[-1])
-        arr = np.asarray(raw)
-        row = arr.reshape(-1, arr.shape[-1])[-1]            # (V,) last position
-        if not temperature:
-            return int(row.argmax())
-        cand = np.flatnonzero(row > -1e8)                  # scored candidates only (skip -1e9 fill)
-        logits = row[cand].astype(np.float32) / temperature
-        logits -= logits.max()
-        p = np.exp(logits)
-        p /= p.sum()
-        return int(cand[rng.choice(cand.size, p=p)])
+            return int(np.asarray(od[self.token_out]).flat[-1])
+        row = np.asarray(od[self.token_out])                 # contract A: (1,1,V) logits
+        row = row.reshape(-1, row.shape[-1])[-1]              # (V,) last position
+        cand = np.flatnonzero(row > -1e8)                    # scored candidates (skip -1e9 fill)
+        return self._pick(row[cand], cand, temperature, rng)
 
     def generate(self, prompt_ids, max_new, temperature=0.0, seed=None):
         """Returns (generated_ids, decode_tok_per_s). Decode timer excludes prefill.
@@ -125,16 +139,16 @@ class Decoder:
         rng = np.random.default_rng(seed)
         ids = list(prompt_ids)
         n0 = len(ids)
-        past, raw = self._step(np.array([ids], np.int64),
+        past, od = self._step(np.array([ids], np.int64),
                                np.ones((1, len(ids)), np.int64), self._empty_past())
-        nxt = self._select(raw, temperature, rng)
+        nxt = self._select(od, temperature, rng)
         ids.append(nxt)
         t1 = time.perf_counter()
         gen = 1
         while nxt not in self.eos and gen < max_new:
-            past, raw = self._step(np.array([[nxt]], np.int64),
+            past, od = self._step(np.array([[nxt]], np.int64),
                                    np.ones((1, len(ids)), np.int64), past)
-            nxt = self._select(raw, temperature, rng)
+            nxt = self._select(od, temperature, rng)
             ids.append(nxt)
             gen += 1
         return ids[n0:], gen / (time.perf_counter() - t1)
