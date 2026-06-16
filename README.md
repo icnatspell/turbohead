@@ -29,7 +29,7 @@ findings in `docs/NEXT_STEPS.md`.
 ## Install
 
 ```bash
-uv sync          # everything: surgery, the decode loop, and the quality/speed gates
+uv sync
 # or:  pip install turbohead
 ```
 
