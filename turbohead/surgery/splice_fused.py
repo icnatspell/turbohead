@@ -13,6 +13,7 @@ Usage: `uv run python -m turbohead.surgery.splice_fused [-P 256]`.
 """
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 import numpy as np
@@ -21,29 +22,44 @@ from onnx import helper, TensorProto, numpy_helper
 from loguru import logger
 from turbohead.surgery.build_subgraph import quantize_stage1
 
-SRC = "artifacts/qwen3_0_6b_int4_cpu"
-DST = "artifacts/qwen3_0_6b_fused"
-HEAD = "/lm_head/MatMul_Q8"
 OP_LIB = "csrc/libturbohead.so"
+MATMUL_OPS = {"MatMul", "MatMulNBits", "Gemm", "FusedMatMul"}
 
 
-def splice_fused(P, special_ids, block_size=128):
+def find_head(g):
+    """The dense head is whatever node produces the `logits` graph output (MatMulNBits for
+    an int4/int8 head, MatMul for fp16 — works across genai exports). Returns (node, hidden)."""
+    prod = {o: n for n in g.node for o in n.output}
+    node = prod.get("logits")
+    if node is None or node.op_type not in MATMUL_OPS:
+        raise RuntimeError(f"no matmul head feeding 'logits' (found {node and node.op_type}); "
+                           "this expects a genai-style export where the head emits logits directly")
+    return node, node.input[0]  # input[0] = (1, seq, D) hidden state
+
+
+def read_eos(src):
+    """EOS (+BOS) ids from genai_config -> always-scored special rows, so greedy can emit them."""
+    eos = json.load(open(f"{src}/genai_config.json"))["model"].get("eos_token_id", [])
+    return sorted({*(eos if isinstance(eos, list) else [eos])})
+
+
+def splice_fused(src, dst, P, block_size=128):
     z = np.load("artifacts/clusters.npz")
     Cnorm, Wperm, Vmap = z["Cnorm"], z["Wperm"], z["Vmap"]
     K, cap, D = Wperm.shape
+    special_ids = np.asarray(read_eos(src), np.int64)
     S = len(special_ids)
     N = P * cap + S
     Wspec = np.load("artifacts/head_W.npy")[special_ids].astype(np.float32)
 
-    Path(DST).mkdir(exist_ok=True)
+    Path(dst).mkdir(parents=True, exist_ok=True)
     for f in ("genai_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
-        shutil.copy(f"{SRC}/{f}", f"{DST}/{f}")
-    shutil.copy(OP_LIB, f"{DST}/libturbohead.so")  # decode loop auto-registers this
+        shutil.copy(f"{src}/{f}", f"{dst}/{f}")
+    shutil.copy(OP_LIB, f"{dst}/libturbohead.so")  # decode loop auto-registers this
 
-    m = onnx.load(f"{SRC}/model.onnx")
+    m = onnx.load(f"{src}/model.onnx")
     g = m.graph
-    head = next(n for n in g.node if n.name == HEAD)
-    hidden3d = head.input[0]  # (1, seq, D)
+    head, hidden3d = find_head(g)  # (1, seq, D)
     g.node.remove(head)  # weight initializer stays (tied embed uses it)
 
     nodes = [
@@ -79,17 +95,19 @@ def splice_fused(P, special_ids, block_size=128):
     m = quantize_stage1(m, "int4", block_size)  # fh_sims_mm -> MatMulNBits
 
     for f in ("model.onnx", "model.onnx.data"):
-        Path(f"{DST}/{f}").unlink(missing_ok=True)
-    onnx.save(m, f"{DST}/model.onnx", save_as_external_data=True, location="model.onnx.data")
-    logger.info(f"fused -> {DST}/model.onnx  (P={P}, contract H, shortlist N={N})")
+        Path(f"{dst}/{f}").unlink(missing_ok=True)
+    onnx.save(m, f"{dst}/model.onnx", save_as_external_data=True, location="model.onnx.data")
+    logger.info(f"fused -> {dst}/model.onnx  (P={P}, contract H, N={N}, eos={special_ids.tolist()})")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Fused splice (contract H — shortlist out)")
+    ap.add_argument("--src", default="artifacts/qwen3_0_6b_int4_cpu", help="baseline genai ONNX dir")
+    ap.add_argument("--dst", default="artifacts/qwen3_0_6b_fused", help="output spliced dir")
     ap.add_argument("-P", "--probes", type=int, default=256)
     ap.add_argument("--block-size", type=int, default=128)
     a = ap.parse_args()
-    splice_fused(a.probes, np.array([151643, 151645], np.int64), block_size=a.block_size)
+    splice_fused(a.src, a.dst, a.probes, block_size=a.block_size)
 
 
 if __name__ == "__main__":
