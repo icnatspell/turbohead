@@ -23,6 +23,7 @@ CLI:
                    ~2ms full-vocab softmax the dense head pays — see docs/NEXT_STEPS.md #4)
     --seed N       RNG seed for sampling
 """
+import os
 import time
 import json
 import glob
@@ -59,6 +60,9 @@ class Decoder:
         if profile:
             so.enable_profiling = True
             so.profile_file_prefix = f"{self.dir}/ortprof"
+        lib = f"{self.dir}/libturbohead.so"  # fused contract-B model ships its custom-op kernel here
+        if os.path.exists(lib):
+            so.register_custom_ops_library(lib)
         self.sess = ort.InferenceSession(f"{self.dir}/model.onnx", so,
                                          providers=["CPUExecutionProvider"])
         self.out_names = [o.name for o in self.sess.get_outputs()]

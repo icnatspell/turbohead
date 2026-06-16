@@ -17,3 +17,7 @@ artifacts/
 *.npz
 *.npy
 *.log
+
+# Custom-op build (reproduced by csrc/build.sh)
+csrc/include/
+csrc/*.so
