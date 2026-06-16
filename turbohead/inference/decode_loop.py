@@ -55,9 +55,6 @@ class Decoder:
 
     def __init__(self, model_dir, threads=1, profile=False):
         self.dir = model_dir.rstrip("/")
-        # match the fused kernel's OpenMP threads to ORT intra-op (read by libgomp at
-        # first parallel region; set before the lib runs). Per-process, fine for serving.
-        os.environ["OMP_NUM_THREADS"] = str(threads)
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
         if profile:

@@ -41,9 +41,11 @@ void FlashHeadSelect(const Tensor<float>&   h,
   float*   lg = cand_logits.Allocate({1, N});
   int64_t* id = cand_ids.Allocate({1, N});
 
-  // Embarrassingly parallel: each p writes a disjoint [p*cap, p*cap+cap) slice.
-  // No reduction (argmax moved to Python over the shortlist), so no races.
-#pragma omp parallel for schedule(static)
+  // Serial on purpose: this loop is memory-bound (streams ~P*cap*D*4 = 16.8MB of weight
+  // rows), so one thread already saturates the bandwidth that matters. Tested OpenMP over
+  // p (disjoint writes, no reduction) — no gain at 4 threads, ~7% SLOWER at 8 (fork/join +
+  // oversubscription vs ORT's spinning idle threads). The body's ORT threads parallelize
+  // the heavy matmuls; this ~2ms head is not the bottleneck.
   for (int64_t p = 0; p < P; ++p) {
     const int64_t  c    = tip[p];
     const float*   rows = W + c * cap * D;

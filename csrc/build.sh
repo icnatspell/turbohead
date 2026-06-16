@@ -23,9 +23,8 @@ for _ in 1 2 3; do
 done
 
 # -ffast-math: lets the dot-product reduction auto-vectorize (strict FP ordering
-#   otherwise forces a scalar loop ~2x slower).
-# -fopenmp: parallelizes the per-cluster loop across cores (match OMP_NUM_THREADS
-#   to ORT intra_op threads; the decode loop sets this).
-g++ -O3 -march=native -ffast-math -funroll-loops -fopenmp -std=c++17 -shared -fPIC \
+#   otherwise forces a scalar loop ~2x slower). Kernel is serial by design — see the
+#   note in turbohead_op.cc (OpenMP tested, no gain: the loop is memory-bound).
+g++ -O3 -march=native -ffast-math -funroll-loops -std=c++17 -shared -fPIC \
     -I"$INC" turbohead_op.cc -o libturbohead.so
 echo "built csrc/libturbohead.so"
