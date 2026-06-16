@@ -52,6 +52,8 @@ def splice_fused(src, dst, P, block_size=128):
     N = P * cap + S
     Wspec = np.load("artifacts/head_W.npy")[special_ids].astype(np.float32)
 
+    if not Path(OP_LIB).exists():
+        raise FileNotFoundError(f"{OP_LIB} not built — run `bash csrc/build.sh` first")
     Path(dst).mkdir(parents=True, exist_ok=True)
     for f in ("genai_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
         shutil.copy(f"{src}/{f}", f"{dst}/{f}")
