@@ -17,6 +17,7 @@ Usage: `uv run turbohead-splice [--backend fused|onnx] [--src DIR] [--dst DIR] [
 
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 import numpy as np
@@ -47,6 +48,15 @@ def find_head(graph):
     return node, node.input[0]  # input[0] = (1, seq, D) hidden state
 
 
+def copy_configs(src, dst):
+    """Copy every non-model file (tokenizer, genai_config, chat template if present, ...) from a
+    genai export to a derived dir. Robust across models — base exports omit chat_template.jinja."""
+    Path(dst).mkdir(parents=True, exist_ok=True)
+    for f in os.listdir(src):
+        if f not in ("model.onnx", "model.onnx.data") and os.path.isfile(f"{src}/{f}"):
+            shutil.copy(f"{src}/{f}", f"{dst}/{f}")
+
+
 def read_eos(src):
     """EOS (+BOS) ids from genai_config -> always-scored special rows so greedy can emit them."""
     eos = json.load(open(f"{src}/genai_config.json"))["model"].get("eos_token_id", [])
@@ -71,9 +81,7 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
     N = P * cap + len(special_ids)
     Wspec = np.load(head)[special_ids]  # (S,D) fp32; stage-2 builders cast as needed
 
-    Path(dst).mkdir(parents=True, exist_ok=True)
-    for f in ("genai_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
-        shutil.copy(f"{src}/{f}", f"{dst}/{f}")
+    copy_configs(src, dst)
     if backend == "fused":
         shutil.copy(OP_LIB, f"{dst}/libturbohead.so")  # decode loop auto-registers this
 

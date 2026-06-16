@@ -20,6 +20,10 @@ ROOT=artifacts/$SLUG
 BASE=$ROOT/baseline
 HEAD=$ROOT/head_W.npy
 NPZ=$ROOT/clusters.npz
+LOGS=$ROOT/logs
+
+mkdir -p "$LOGS"
+exec > >(tee "$LOGS/build.log") 2>&1   # keep the full build log with the artifacts
 
 echo "== build_all: $MODEL -> $ROOT/ (cap=$CAP P=$P) =="
 
@@ -27,13 +31,17 @@ echo "== build_all: $MODEL -> $ROOT/ (cap=$CAP P=$P) =="
 
 if [ "${FORCE:-0}" = 1 ] || [ ! -f "$BASE/model.onnx" ]; then
   rm -rf "$BASE"
-  MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash turbohead/surgery/convert_baseline.sh
+  # k_quant_last is preferred but breaks on some shapes; fall back to plain RTN int4 if it fails.
+  MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash turbohead/surgery/convert_baseline.sh \
+    || { echo "-- k_quant_last failed; retrying baseline with RTN int4"; rm -rf "$BASE"; \
+         INT4_ALGO= MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash turbohead/surgery/convert_baseline.sh; }
 else
   echo "-- baseline exists ($BASE/model.onnx); skip (FORCE=1 to rebuild)"
 fi
 
-uv run turbohead-extract-head   --model "$MODEL" --out "$HEAD"
-uv run turbohead-build-clusters --head "$HEAD" --out "$NPZ" --cap "$CAP"
+# head_W + clusters are deterministic and slow (clustering ~minutes); reuse unless FORCE=1.
+if [ "${FORCE:-0}" = 1 ] || [ ! -f "$HEAD" ]; then uv run turbohead-extract-head   --model "$MODEL" --out "$HEAD"; fi
+if [ "${FORCE:-0}" = 1 ] || [ ! -f "$NPZ"  ]; then uv run turbohead-build-clusters --head "$HEAD" --out "$NPZ" --cap "$CAP"; fi
 
 # dense-head baselines (the comparison points): fp32-eq, int8, int4 at two group sizes
 uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 16                 --dst "$ROOT/head16"
@@ -47,9 +55,9 @@ uv run turbohead-splice --backend fused --src "$BASE" --npz "$NPZ" --head "$HEAD
 
 cat <<EOF
 
-== built. now bench + eval ==
-  uv run turbohead-bench $ROOT/head16 $ROOT/head8g128 $ROOT/head4g128 $ROOT/head4g32 \\
-      $ROOT/onnx $ROOT/fused --threads 1,2,4,8 --reps 7
-  uv run turbohead-bench ... --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
-  uv run turbohead-head-quality --src $ROOT --npz $NPZ --head $HEAD -P $P
+== built (build log: $LOGS/build.log). now bench + eval ==
+  HEADS="$ROOT/head16 $ROOT/head8g128 $ROOT/head4g128 $ROOT/head4g32 $ROOT/onnx $ROOT/fused"
+  uv run turbohead-bench \$HEADS --threads 1,2,4,8 --reps 7                          2>&1 | tee $LOGS/bench_greedy.log
+  uv run turbohead-bench \$HEADS --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0 2>&1 | tee $LOGS/bench_sample.log
+  uv run turbohead-head-quality --src $ROOT --npz $NPZ --head $HEAD -P $P            2>&1 | tee $LOGS/quality.log
 EOF

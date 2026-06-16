@@ -14,15 +14,12 @@ Usage: `uv run turbohead-quantize-head --bits 4 --group-size 128 [--src DIR] [--
 """
 
 import argparse
-import shutil
 from pathlib import Path
 import numpy as np
 import onnx
 from onnx import helper, TensorProto, numpy_helper
 from loguru import logger
-from turbohead.surgery.splice import find_head, DEFAULT_SRC, HEAD_W
-
-CFG = ("genai_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
+from turbohead.surgery.splice import find_head, copy_configs, DEFAULT_SRC, HEAD_W
 
 
 def _nbits(model, bits, block_size, node_name):
@@ -38,9 +35,7 @@ def quantize_head(src=DEFAULT_SRC, dst=None, bits=4, group_size=128, head=HEAD_W
         raise ValueError(f"bits must be 16, 8 or 4, got {bits}")
     dst = dst or f"{src}_head{bits}" + (f"g{group_size}" if bits < 16 else "")
 
-    Path(dst).mkdir(parents=True, exist_ok=True)
-    for f in CFG:
-        shutil.copy(f"{src}/{f}", f"{dst}/{f}")
+    copy_configs(src, dst)
 
     m = onnx.load(f"{src}/model.onnx")
     g = m.graph
