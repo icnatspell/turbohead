@@ -23,6 +23,7 @@ turbohead-build-clusters = "turbohead.surgery.build_clusters:main"
 turbohead-build-subgraph = "turbohead.surgery.build_subgraph:main"
 turbohead-splice = "turbohead.surgery.splice:main"
 turbohead-agreement = "turbohead.eval.agreement:main"
+turbohead-ppl = "turbohead.eval.ppl:main"
 
 [project.optional-dependencies]
 # Apply the method (turbohead/surgery): cluster + graph surgery + baseline builder.
