@@ -56,11 +56,21 @@ uv run turbohead-build-clusters                # default cap=16; or --cap 32 / -
 uv run turbohead-splice -P 256 --stage1 int4 --block-size 128
 ```
 
-- **Cluster count** is the cluster ratio. `--cap N` sets tokens per cluster (FlashHead's
-  `DEFAULT_CLUSTER_RATIO=16`), giving `K = V/cap` clusters; `--clusters` sets `K` directly. `cap`
-  must divide `V`. Downstream steps read `cap`/`K` from the `.npz`, so only this step needs the knob.
-- `-P` (probes) and **stage-1 precision** (`fp16` | `int8` | `int4`, default int4) plus quant
-  `--block-size` are chosen at splice time. int4 runs fastest; fp16 reproduces the dense head exactly.
+`turbohead-build-clusters` sets the clustering. Pick `--cap` or `--clusters`, not both:
+
+| flag | default | what it does |
+|---|---|---|
+| `--cap N` | `16` | tokens per cluster (FlashHead's cluster ratio); gives `K = V/cap` clusters. `cap` must divide `V`. Lower `cap` means more, smaller clusters |
+| `--clusters K` | — | set the cluster count `K` directly instead of `cap` |
+
+`turbohead-splice` sets the runtime tradeoff. Downstream steps read `cap`/`K` from the `.npz`, so
+only these two flags shape inference:
+
+| flag | default | what it does |
+|---|---|---|
+| `-P N` | `256` | probes: how many top clusters stage 2 refines. Higher `P` lifts coverage and accuracy, costs speed |
+| `--stage1 {fp16,int8,int4}` | `int4` | centroid-scoring precision. `int4` is fastest; `fp16` reproduces the dense head exactly |
+| `--block-size N` | `128` | `MatMulNBits` quant group size for int4/int8 stage 1 (ignored for fp16) |
 
 ### Online: the decode loop
 
@@ -79,10 +89,16 @@ print(dec.tok.decode(out))
 ```
 
 The loop auto-detects the head contract (A = logits-out, B = token-out) and manages the KV cache.
-Flags: `--threads N`, `--reps R` (median tok/s), `--max-new M`, `--prompt STR`, `--temperature T`,
-`--seed N`, `--profile`. `--temperature 0` runs greedy argmax. `>0` samples with probed-softmax over
-only the scored candidate set, skipping the full-vocab softmax the dense head pays, so sampling
-speeds up more than greedy.
+
+| flag | default | what it does |
+|---|---|---|
+| `--threads N` | `1` | intra-op threads |
+| `--max-new M` | `64` | tokens to generate |
+| `--temperature T` | `0` | `0` runs greedy argmax; `>0` samples with probed-softmax over the candidate set, skipping the full-vocab softmax the dense head pays, so sampling speeds up more than greedy |
+| `--seed N` | none | RNG seed for sampling |
+| `--reps R` | `1` | benchmark: report median tok/s over `R` runs |
+| `--prompt STR` | demo text | input prompt |
+| `--profile` | off | dump the per-op breakdown (see below) |
 
 ### Measuring quality
 
