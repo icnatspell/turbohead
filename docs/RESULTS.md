@@ -163,6 +163,67 @@ full-vocab likelihood).
 
 ---
 
+## Gemma3-1B (int4 body) — 2026-06-16
+
+V=262144, D=1152, 26 layers. FlashHead: cap=16, K=16384, P=256. Reference PPL (fp32 head) = 7.931.
+Int4 body = RTN (k_quant_last reshape-crashes; auto-fallback). Same 262k vocab as 270M but wider
+hidden + more layers, so the head is a smaller share than 270M → smaller (but still large) flash win.
+
+```bash
+bash turbohead/surgery/build_all.sh google/gemma-3-1b-pt gemma3_1b
+R=artifacts/gemma3_1b
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7                              # greedy
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
+uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.npy -P 256
+```
+
+### Quality (vs fp32 head, 1999 WikiText-2 positions)
+
+| head | top-1 agree | PPL |
+|---|---|---|
+| head16 (fp32-eq, ref) | 100.0% | 7.931 |
+| head8 g128 | **97.9%** | 7.929 |
+| head4 g128 | 85.5% | 8.413 |
+| head4 g32 | 90.7% | 8.149 |
+| flash onnx / fused (A / H) | 94.4% | 171.189 † |
+
+† Coverage 85.6% at P=256; *covered* PPL = 3.886.
+
+### Speed — greedy (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 12.3±0.2 (1.00×) | 18.7±0.2 (1.00×) | 20.9±0.5 (1.00×) | 21.0±0.2 (1.00×) |
+| head8 g128 | 23.4±0.7 (1.91×) | 35.9±0.6 (1.92×) | 42.0±0.6 (2.01×) | 41.2±0.9 (1.96×) |
+| head4 g128 | 29.7±0.4 (2.42×) | 43.2±1.1 (2.31×) | 49.7±1.5 (2.38×) | 47.5±2.6 (2.26×) |
+| head4 g32 | 27.6±0.3 (2.25×) | 39.1±1.6 (2.09×) | 44.0±1.7 (2.11×) | 46.3±1.1 (2.20×) |
+| flash onnx (A) | 34.3±0.4 (2.79×) | 48.9±0.8 (2.61×) | 57.5±2.1 (2.75×) | 57.1±1.4 (2.71×) |
+| **flash fused (H)** | **37.3±0.2 (3.04×)** | **50.8±1.2 (2.71×)** | **61.8±2.0 (2.96×)** | **61.8±2.6 (2.94×)** |
+
+### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 11.6±0.2 (1.00×) | 17.4±0.3 (1.00×) | 19.6±0.2 (1.00×) | 19.8±0.2 (1.00×) |
+| head8 g128 | 22.5±0.4 (1.95×) | 30.0±1.4 (1.72×) | 36.7±0.5 (1.87×) | 34.9±2.0 (1.76×) |
+| head4 g128 | 25.9±0.6 (2.24×) | 36.0±1.5 (2.07×) | 40.9±1.8 (2.08×) | 42.2±1.5 (2.13×) |
+| head4 g32 | 22.1±1.1 (1.91×) | 34.0±1.2 (1.95×) | 38.3±0.8 (1.95×) | 37.9±0.9 (1.91×) |
+| flash onnx (A) | 31.8±0.9 (2.75×) | 47.2±2.4 (2.71×) | 54.2±2.0 (2.76×) | 53.1±2.3 (2.68×) |
+| **flash fused (H)** | **35.6±1.0 (3.08×)** | **48.4±2.2 (2.77×)** | **57.5±3.2 (2.93×)** | **56.5±1.7 (2.85×)** |
+
+### Takeaways
+
+- Fused FlashHead **3.04× greedy / 3.08× sampling @1t** vs fp32 head — between Qwen3-0.6B (2.40×) and
+  Gemma3-270M (5.37×), consistent with head share: same 262k vocab as 270M but D=1152 and 26 layers
+  dilute the head's fraction of decode.
+- Fused beats every dense head at every thread count; head8 g128 again the dense quality sweet spot
+  (97.9%, fp32-equal PPL). int4 dense agreement weak (85.5% g128 / 90.7% g32); flash 94.4% is the
+  better trade. Coverage 85.6% — bump P if full-vocab likelihood matters.
+
+---
+
 ## Models pending
 
 Each is one `build_all.sh <hf-model> <slug>` then the three commands above. FlashHead's edge should
@@ -170,7 +231,6 @@ grow where the head is a larger share of decode (bigger V:D, fewer layers).
 
 | model | hf id | slug |
 |---|---|---|
-| Gemma3-1B | `google/gemma-3-1b-pt` | `gemma3_1b` |
 | Llama-3.2-1B | `meta-llama/Llama-3.2-1B` | `llama3_2_1b` |
 | Qwen3-1.7B | `Qwen/Qwen3-1.7B` | `qwen3_1_7b` |
 | Qwen3.5-0.8B | `Qwen/Qwen3.5-0.8B` | `qwen3_5_0_8b` |
