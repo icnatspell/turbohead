@@ -4,8 +4,8 @@ import os
 import pytest
 from turbohead.inference.decode_loop import Decoder
 
-MODEL = "artifacts/qwen3_0_6b_flash"
-FUSED = "artifacts/qwen3_0_6b_fused"
+MODEL = "artifacts/qwen3_0_6b_int4_cpu_onnx"    # contract-A (onnx backend)
+FUSED = "artifacts/qwen3_0_6b_int4_cpu_fused"   # contract-H (fused custom op)
 pytestmark = pytest.mark.skipif(not os.path.isdir(MODEL),
                                 reason=f"{MODEL} not built (run the surgery pipeline)")
 

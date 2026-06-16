@@ -86,8 +86,10 @@ class Decoder:
 
         # Contract: A emits full `logits` (1,V); H emits the candidate shortlist
         # (cand_logits, cand_ids) from the fused op; B emits the token id directly.
+        # `backend` is the human-facing label for which splice produced this model.
         self.contract = ("A" if "logits" in self.out_names
                          else "H" if "cand_logits" in self.out_names else "B")
+        self.backend = {"A": "onnx", "H": "fused", "B": "fused"}[self.contract]
         self.token_out = ("logits" if self.contract == "A"
                           else None if self.contract == "H"
                           else next(n for n in self.out_names if not n.startswith("present.")))
@@ -202,7 +204,7 @@ def main():
 
     dec = Decoder(a.model_dir, a.threads, a.profile)
     ids = dec.tok(a.prompt)["input_ids"]
-    logger.info(f"{a.model_dir} | contract {dec.contract} | "
+    logger.info(f"{a.model_dir} | backend {dec.backend} (contract {dec.contract}) | "
                 f"{dec.n_layers}L kv_heads={dec.kv_heads} head_size={dec.head_size} | "
                 f"threads={a.threads} | temp={a.temperature}")
 
