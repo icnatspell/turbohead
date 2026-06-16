@@ -32,10 +32,7 @@ echo "$MODEL" > "$ROOT/hf_model_id.txt"   # makes the artifact dir self-describi
 
 if [ "${FORCE:-0}" = 1 ] || [ ! -f "$BASE/model.onnx" ]; then
   rm -rf "$BASE"
-  # k_quant_last is preferred but breaks on some shapes; fall back to plain RTN int4 if it fails.
-  MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash turbohead/surgery/convert_baseline.sh \
-    || { echo "-- k_quant_last failed; retrying baseline with RTN int4"; rm -rf "$BASE"; \
-         INT4_ALGO= MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash turbohead/surgery/convert_baseline.sh; }
+  MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash turbohead/surgery/convert_baseline.sh
 else
   echo "-- baseline exists ($BASE/model.onnx); skip (FORCE=1 to rebuild)"
 fi
