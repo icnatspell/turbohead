@@ -20,9 +20,10 @@ CLI:
     --profile      dump + summarize an ORT profile of one run
     --prompt STR   prompt text
     --temperature  0 = greedy argmax; >0 = sample over the probed candidate set (skips the
-                   ~2ms full-vocab softmax the dense head pays — see docs/NEXT_STEPS.md #4)
+                   ~2ms full-vocab softmax the dense head pays — see docs/ORT_QUIRKS.md #6)
     --seed N       RNG seed for sampling
 """
+import os
 import time
 import json
 import glob
@@ -59,9 +60,13 @@ class Decoder:
         if profile:
             so.enable_profiling = True
             so.profile_file_prefix = f"{self.dir}/ortprof"
+        lib = f"{self.dir}/libturbohead.so"  # fused model ships its custom-op kernel here
+        if os.path.exists(lib):
+            so.register_custom_ops_library(lib)
         self.sess = ort.InferenceSession(f"{self.dir}/model.onnx", so,
                                          providers=["CPUExecutionProvider"])
         self.out_names = [o.name for o in self.sess.get_outputs()]
+        self.in_names = {i.name for i in self.sess.get_inputs()}
 
         # Tokenizer + EOS ship with the model (splice copies them) — no hardcoded identity.
         self.tok = AutoTokenizer.from_pretrained(self.dir)
@@ -69,51 +74,109 @@ class Decoder:
             "eos_token_id", self.tok.eos_token_id)
         self.eos = set(eos) if isinstance(eos, list) else {eos}
 
-        # KV cache geometry from the past_key_values.*.key inputs.
-        keys = [i for i in self.sess.get_inputs() if i.name.startswith("past_key_values.")]
-        self.n_layers = sum(1 for k in keys if k.name.endswith(".key"))
-        kshape = next(i.shape for i in self.sess.get_inputs()
-                      if i.name == "past_key_values.0.key")
-        self.kv_heads, self.head_size = int(kshape[1]), int(kshape[3])
-        self.kv_names = [f"past_key_values.{i}.{kv}"
-                         for i in range(self.n_layers) for kv in ("key", "value")]
-        self.present_names = [f"present.{i}.{kv}"
-                              for i in range(self.n_layers) for kv in ("key", "value")]
+        # State inputs: KV cache and/or SSM conv/recurrent state. Discovered generically by name
+        # so hybrid models work — attention layers interleaved with conv/recurrent layers, at
+        # sparse indices (e.g. LFM2, Qwen3.5), not just uniform-KV transformers. Each `past*` input
+        # is fed back each step from the matching `present*` output (same suffix), seeded with zeros
+        # of its OWN declared shape: KV's seq dim is symbolic -> 0 (grows), recurrent/conv state is
+        # all-concrete -> full size (updated in place). One path handles both.
+        state = [i for i in self.sess.get_inputs() if i.name.startswith("past")]
+        self.state_seed = {i.name: self._zero_state(i) for i in state}
+        # present output for each past input: past_key_values.2.key -> present.2.key,
+        # past_conv.0 -> present_conv.0 (strip the `past[_key_values]` prefix, prepend `present`).
+        def present_of(n):
+            pre = "past_key_values" if n.startswith("past_key_values") else "past"
+            return "present" + n[len(pre):]
+        self.present_for = {i.name: present_of(i.name) for i in state}
+        missing = [p for p in self.present_for.values() if p not in self.out_names]
+        assert state and not missing, f"no present output for {missing}"
+        # geometry (profile log only): attention layers carry `.key`; SSM layers don't.
+        keys = [i for i in state if i.name.endswith(".key")]
+        self.n_layers = len(keys)
+        self.kv_heads, self.head_size = (int(keys[0].shape[1]), int(keys[0].shape[3])) if keys else (0, 0)
 
-        # Contract: A emits `logits`, B emits the token id directly.
-        self.contract = "A" if "logits" in self.out_names else "B"
-        self.token_out = "logits" if self.contract == "A" \
-            else next(n for n in self.out_names if not n.startswith("present."))
+        # Token feed: most graphs take input_ids; some (Qwen3.5) split the embedding lookup out and
+        # want inputs_embeds — we do the lookup in numpy from the tied embedding (= head_W) — plus a
+        # position_ids (Qwen3.5's is 3-D, M-RoPE; for text all channels = the absolute position).
+        extra = (self.in_names - {"input_ids", "inputs_embeds", "attention_mask", "position_ids"}
+                 - set(self.state_seed))
+        if extra or not ({"input_ids", "inputs_embeds"} & self.in_names):
+            raise NotImplementedError(f"{self.dir}: unsupported graph inputs {sorted(extra)} "
+                                      "(need input_ids or inputs_embeds, + attention_mask + state)")
+        self.embeds_in = "inputs_embeds" in self.in_names
+        self.wants_position_ids = "position_ids" in self.in_names
+        self.pos_rank = next((len(i.shape) for i in self.sess.get_inputs()
+                              if i.name == "position_ids"), 0)
+        if self.embeds_in:  # tied-embedding lookup matrix: model dir, else build_all's artifacts/<slug>/
+            ep = next((p for p in (f"{self.dir}/embed.npy", f"{self.dir}/../head_W.npy")
+                       if os.path.exists(p)), None)
+            if not ep:
+                raise FileNotFoundError(f"{self.dir}: inputs_embeds graph needs embed.npy or ../head_W.npy")
+            self.embed = np.load(ep, mmap_mode="r")  # [V,D] tied embed; fancy-index gathers token rows
+
+        # Contract: A emits full `logits` (1,V); H emits the candidate shortlist
+        # (cand_logits, cand_ids) from the fused op; B emits the token id directly.
+        # `backend` is the human-facing label for which splice produced this model.
+        self.contract = ("A" if "logits" in self.out_names
+                         else "H" if "cand_logits" in self.out_names else "B")
+        self.backend = {"A": "onnx", "H": "fused", "B": "fused"}[self.contract]
+        self.token_out = ("logits" if self.contract == "A"
+                          else None if self.contract == "H"
+                          else next(n for n in self.out_names if not n.startswith("present.")))
+
+    @staticmethod
+    def _zero_state(inp):
+        """Zero seed for a state input from its declared shape: dim 0 (batch) -> 1, any other
+        symbolic dim -> 0 (KV seq dim, grows); concrete dims kept (recurrent/conv state, full size)."""
+        dt = {"tensor(float)": np.float32, "tensor(float16)": np.float16}.get(inp.type, np.float32)
+        shape = [d if isinstance(d, int) else (1 if i == 0 else 0) for i, d in enumerate(inp.shape)]
+        return np.zeros(shape, dt)
 
     def _empty_past(self):
-        z = np.zeros((1, self.kv_heads, 0, self.head_size), np.float32)
-        return dict.fromkeys(self.kv_names, z)
+        return dict(self.state_seed)
 
-    def _step(self, input_ids, attn, past):
-        od = dict(zip(self.out_names,
-                      self.sess.run(None, {"input_ids": input_ids,
-                                           "attention_mask": attn, **past})))
-        past = {p: od[pr] for p, pr in zip(self.kv_names, self.present_names)}
-        return past, od[self.token_out]   # raw: logits (A) or token id (B)
+    def _pos(self, start, k):
+        """position_ids for the k tokens at absolute positions [start, start+k). Matches the graph's
+        declared rank — 3 = Qwen3.5 M-RoPE [3,1,k] (text: all channels equal), else 2-D [1,k]."""
+        p = np.arange(start, start + k, dtype=np.int64)
+        return np.broadcast_to(p, (3, 1, k)).copy() if self.pos_rank == 3 else p.reshape(1, k)
 
-    def _select(self, raw, temperature, rng):
-        """temp=0 -> argmax. temp>0 -> probed-softmax sampling: softmax/multinomial over ONLY
-        the scored candidates (the (1,V) head fills non-candidates with -1e9), skipping the
-        ~2ms full-vocab softmax the dense head pays. Contract B is greedy-only (no logits)."""
+    def _step(self, tokens, attn, past, start):
+        # tokens: int64 (1,k). embeds-in graphs get inputs_embeds = tied-embed rows; else input_ids.
+        x = self.embed[tokens].astype(np.float32, copy=False) if self.embeds_in else tokens
+        feeds = {("inputs_embeds" if self.embeds_in else "input_ids"): x, "attention_mask": attn, **past}
+        if self.wants_position_ids:
+            feeds["position_ids"] = self._pos(start, tokens.shape[1])
+        od = dict(zip(self.out_names, self.sess.run(None, feeds)))
+        past = {name: od[pres] for name, pres in self.present_for.items()}
+        return past, od
+
+    @staticmethod
+    def _pick(logits, ids, temperature, rng):
+        """Greedy (argmax) or temperature sampling over a candidate (logits, ids) shortlist."""
+        if not temperature:
+            return int(ids[logits.argmax()])
+        x = logits.astype(np.float32) / temperature
+        x -= x.max()
+        p = np.exp(x)
+        p /= p.sum()
+        return int(ids[rng.choice(ids.size, p=p)])
+
+    def _select(self, od, temperature, rng):
+        """Pick the next token. H: argmax/sample over the fused op's shortlist. A: same,
+        but the candidate set is the (1,V) entries above the -1e9 fill (skips full-vocab
+        softmax). B: token-out, greedy only."""
+        if self.contract == "H":
+            return self._pick(od["cand_logits"].reshape(-1), od["cand_ids"].reshape(-1),
+                              temperature, rng)
         if self.contract == "B":
             if temperature:
                 raise ValueError("temperature>0 needs logits; this graph is token-out (contract B)")
-            return int(np.asarray(raw).flat[-1])
-        arr = np.asarray(raw)
-        row = arr.reshape(-1, arr.shape[-1])[-1]            # (V,) last position
-        if not temperature:
-            return int(row.argmax())
-        cand = np.flatnonzero(row > -1e8)                  # scored candidates only (skip -1e9 fill)
-        logits = row[cand].astype(np.float32) / temperature
-        logits -= logits.max()
-        p = np.exp(logits)
-        p /= p.sum()
-        return int(cand[rng.choice(cand.size, p=p)])
+            return int(np.asarray(od[self.token_out]).flat[-1])
+        row = np.asarray(od[self.token_out])                 # contract A: (1,1,V) logits
+        row = row.reshape(-1, row.shape[-1])[-1]              # (V,) last position
+        cand = np.flatnonzero(row > -1e8)                    # scored candidates (skip -1e9 fill)
+        return self._pick(row[cand], cand, temperature, rng)
 
     def generate(self, prompt_ids, max_new, temperature=0.0, seed=None):
         """Returns (generated_ids, decode_tok_per_s). Decode timer excludes prefill.
@@ -121,16 +184,16 @@ class Decoder:
         rng = np.random.default_rng(seed)
         ids = list(prompt_ids)
         n0 = len(ids)
-        past, raw = self._step(np.array([ids], np.int64),
-                               np.ones((1, len(ids)), np.int64), self._empty_past())
-        nxt = self._select(raw, temperature, rng)
+        past, od = self._step(np.array([ids], np.int64),
+                               np.ones((1, len(ids)), np.int64), self._empty_past(), 0)
+        nxt = self._select(od, temperature, rng)
         ids.append(nxt)
         t1 = time.perf_counter()
         gen = 1
         while nxt not in self.eos and gen < max_new:
-            past, raw = self._step(np.array([[nxt]], np.int64),
-                                   np.ones((1, len(ids)), np.int64), past)
-            nxt = self._select(raw, temperature, rng)
+            past, od = self._step(np.array([[nxt]], np.int64),
+                                   np.ones((1, len(ids)), np.int64), past, len(ids) - 1)
+            nxt = self._select(od, temperature, rng)
             ids.append(nxt)
             gen += 1
         return ids[n0:], gen / (time.perf_counter() - t1)
@@ -187,7 +250,7 @@ def main():
 
     dec = Decoder(a.model_dir, a.threads, a.profile)
     ids = dec.tok(a.prompt)["input_ids"]
-    logger.info(f"{a.model_dir} | contract {dec.contract} | "
+    logger.info(f"{a.model_dir} | backend {dec.backend} (contract {dec.contract}) | "
                 f"{dec.n_layers}L kv_heads={dec.kv_heads} head_size={dec.head_size} | "
                 f"threads={a.threads} | temp={a.temperature}")
 
