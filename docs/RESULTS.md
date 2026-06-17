@@ -16,6 +16,11 @@ hidden `D` + large vocab `V` + few layers ⇒ the head dominates ⇒ bigger spee
 | Qwen3-0.6B | 1024 | 152k | 28 | **2.40×** | **2.45×** | 97.6% | 88.5% | 98.5% |
 | Llama-3.2-1B | 2048 | 128k | 16 | **2.09×** | **2.08×** | 96.9% | 90.8% | 99.3% |
 | Qwen3-1.7B | 2048 | 152k | 28 | **2.05×** | **2.10×** | 97.9% | 88.6% | 98.5% |
+| h2o-danube3-500m | 1536 | 32k | 16 | **1.45×** | **1.21×** | 94.5% | 90.8% | 99.6% |
+
+Quality-only (speed N/A — hybrid Mamba/attention, decode loop is KV-attention only): **Qwen3.5-0.8B**
+(flash 96.7% agree, head8g128 98.9%). The tiny-vocab **danube3** sits at the low end — its head is a
+small share of decode, so flash barely leads dense heads; see its `P`-sensitivity note below.
 
 Constant across the set: **fused flash beats every dense quant head** (incl. int4) on both speed and
 greedy agreement at every thread count; **`head8 g128`** is the dense quality sweet spot (≈98–99%
@@ -399,6 +404,90 @@ standard-transformer models — the head method transfers fine; only the runtime
 
 ---
 
+## h2o-danube3-500m-chat (int4 body) — 2026-06-17
+
+V=32000, D=1536, 16 layers, **untied** embeddings. FlashHead: cap=16, K=2000, P=256. Reference PPL
+(fp32 head) = 6.791. Standard Llama-style transformer. This is the **low end of the head-share
+spectrum** — tiny vocab (32k) + wide hidden (1536) means the head is a small fraction of a decode step,
+so the flash win is the smallest of the set and even dense quant heads are competitive. Numbers are
+noisier here than for the larger models (a fast ~20 ms/step model amplifies run-to-run variance).
+
+```bash
+bash turbohead/surgery/build_all.sh h2oai/h2o-danube3-500m-chat danube3_500m
+R=artifacts/danube3_500m
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7                              # greedy
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
+uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.npy -P 256
+```
+
+### Quality (vs fp32 head, 1999 WikiText-2 positions)
+
+| head | top-1 agree | PPL |
+|---|---|---|
+| head16 (fp32-eq, ref) | 100.0% | 6.791 |
+| head8 g128 | **99.6%** | 6.793 |
+| head4 g128 | 94.5% | 6.858 |
+| head4 g32 | 96.3% | 6.837 |
+| flash onnx / fused (A / H) | 94.5% | 51.833 † |
+
+† Coverage 90.8% at P=256 (high — small vocab); *covered* PPL = 4.698.
+
+### Speed — greedy (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 35.9±6.8 (1.00×) | 53.8±2.5 (1.00×) | 65.1±3.7 (1.00×) | 67.8±3.8 (1.00×) |
+| head8 g128 | 49.8±0.7 (1.39×) | 85.5±3.9 (1.59×) | 106.0±2.3 (1.63×) | 108.8±2.1 (1.60×) |
+| head4 g128 | 54.9±1.3 (1.53×) | 73.2±8.1 (1.36×) | 73.8±10.2 (1.13×) | 80.8±11.0 (1.19×) |
+| head4 g32 | 41.9±2.7 (1.17×) | 81.7±5.4 (1.52×) | 71.6±14.9 (1.10×) | 79.7±7.3 (1.17×) |
+| flash onnx (A) | 44.0±1.5 (1.23×) | 67.3±3.7 (1.25×) | 76.3±4.5 (1.17×) | 78.8±5.7 (1.16×) |
+| **flash fused (H)** | **51.9±5.3 (1.45×)** | 70.8±6.7 (1.31×) | 76.9±4.5 (1.18×) | 83.5±2.2 (1.23×) |
+
+### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 35.0±0.3 (1.00×) | 49.8±2.0 (1.00×) | 55.8±2.2 (1.00×) | 53.0±2.8 (1.00×) |
+| head8 g128 | 43.4±0.9 (1.24×) | 60.0±3.7 (1.20×) | 74.1±3.2 (1.33×) | 71.0±4.0 (1.34×) |
+| head4 g128 | 46.7±0.7 (1.33×) | 70.8±5.1 (1.42×) | 89.5±4.9 (1.61×) | 88.4±12.9 (1.67×) |
+| head4 g32 | 45.0±1.7 (1.29×) | 69.4±2.8 (1.39×) | 84.0±3.1 (1.51×) | 82.4±3.2 (1.55×) |
+| flash onnx (A) | 38.5±1.5 (1.10×) | 56.4±2.4 (1.13×) | 65.9±2.5 (1.18×) | 66.0±6.5 (1.24×) |
+| **flash fused (H)** | **42.3±4.9 (1.21×)** | 68.0±8.9 (1.36×) | 87.4±2.9 (1.57×) | 92.8±5.0 (1.75×) |
+
+### Takeaways
+
+- Fused FlashHead **1.45× greedy / 1.21× sampling @1t** — the smallest win of the set, as expected from
+  the tiny V:D ratio (head is a small share). `head8 g128` (1.39–1.63×, 99.6% agree, fp32-equal PPL) is
+  genuinely competitive here, and int4 dense heads sometimes match fused at 1t — for small-vocab models
+  the case for flash over a well-quantized dense head is weakest.
+- High coverage (90.8%) from the small vocab; flash 94.5% agreement.
+
+### Profile + `P` sensitivity (1 thread, `fused`)
+
+`--profile` of the P=256 fused head (decode step 19.36 ms): `MatMulNBits` 16.51 ms (83%, body +
+stage-1 gemv), **`FlashHeadSelect` (stage 2) 1.57 ms (8%)**, `GroupQueryAttention` 1.28 ms (6%), `TopK`
+0.04 ms, `Gather` 0.03 ms. **`P` scales only stage 2; stage 1 is invisible** (its `[K=2000, D=1536]`
+int4 gemv ≈ 1.5 MB is cache-resident, lumped into the body's `MatMulNBits`). So scaling stage 1 (e.g.
+larger `cap`) reclaims ~nothing; `P` is the only useful head knob.
+
+Re-splicing the fused head at **P=64** (¼ the candidates; no rebuild needed) vs P=256:
+
+| | greedy 1t | 2t | 4t | 8t | top-1 agree | coverage |
+|---|---|---|---|---|---|---|
+| fused P=256 | 1.48× | 1.37× | 1.38× | 1.23× | 94.5% | 90.8% |
+| fused **P=64** | **1.55×** | 1.52× | 1.63× | **1.57×** | 83.7% | 76.7% |
+| P=64 vs P=256 | +4.7% | +11% | +18% | **+27%** | −10.8 pts | −14 pts |
+
+At 1 thread P=64 is only **~5% faster** (matches the profile: stage 2 is 8% of the step, cut 4× ≈ 6%)
+and costs ~11 points of agreement — a poor greedy trade. The gain grows with threads (to +27% @8t)
+because once the body parallelizes, the **single-threaded** `FlashHeadSelect` becomes the relative
+bottleneck — but 8t isn't the deploy point. Net: lowering `P` only pays off when the head is a large
+share (big-vocab models) or at high thread counts; for small-vocab models keep P high for accuracy.
+
+---
+
 ## Models pending
 
 Each is one `build_all.sh <hf-model> <slug>` then the three commands above. FlashHead's edge should
@@ -407,7 +496,6 @@ grow where the head is a larger share of decode (bigger V:D, fewer layers).
 | model | hf id | slug | note |
 |---|---|---|---|
 | LFM2.5-350M | `LiquidAI/LFM2.5-350M` | `lfm2_5_350m` | LiquidAI hybrid (short-conv + attn) — likely quality-only until the decode loop supports hybrid state |
-| h2o-danube3-500m-chat | `h2oai/h2o-danube3-500m-chat` | `danube3_500m` | standard Llama-style transformer — full bench |
 
 (cap must divide V; if `cap=16` doesn't, `build_all` fails at clustering — pick a divisor of that
 model's vocab via the `[cap]` arg. block_size 128 must divide D.)
