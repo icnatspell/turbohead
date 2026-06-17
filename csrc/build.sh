@@ -6,8 +6,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VER=${ORT_VERSION:-1.26.0}
-INC=include
+# Match headers to the *installed* onnxruntime (dep is >=1.26.0, not pinned) so the build can't drift
+# from the runtime. Override with ORT_VERSION=...; falls back to 1.26.0 if onnxruntime isn't importable.
+_v='import onnxruntime as o; print(o.__version__)'
+VER=${ORT_VERSION:-$(uv run python -c "$_v" 2>/dev/null || python3 -c "$_v" 2>/dev/null || echo 1.26.0)}
+INC=include/$VER   # version-scoped: switching ORT versions fetches fresh headers, never reuses stale
 mkdir -p "$INC"
 BASE="https://raw.githubusercontent.com/microsoft/onnxruntime/v${VER}/include/onnxruntime/core/session"
 # seed headers; resolve transitive #include "..." in a couple of passes

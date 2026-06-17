@@ -58,7 +58,7 @@ def copy_configs(src, dst):
 
 
 def read_eos(src):
-    """EOS (+BOS) ids from genai_config -> always-scored special rows so greedy can emit them."""
+    """EOS id(s) from genai_config -> always-scored special rows so greedy can emit them."""
     eos = json.load(open(f"{src}/genai_config.json"))["model"].get("eos_token_id", [])
     return sorted({*(eos if isinstance(eos, list) else [eos])})
 

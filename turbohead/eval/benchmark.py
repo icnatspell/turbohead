@@ -9,8 +9,8 @@ and arenas from leaking between configs.
   worker  — `--worker DIR`: load one model, 1 warmup + R timed reps, print one JSON line of tok/s.
 
 Usage:
-  uv run turbohead-bench artifacts/qwen3_0_6b_int4_cpu_onnx artifacts/qwen3_0_6b_int4_cpu_fused \\
-      --threads 1,2,4,8 --reps 5 [--temperature 0.8] [--max-new 64]
+  uv run turbohead-bench artifacts/qwen3_0_6b/onnx artifacts/qwen3_0_6b/fused \\
+      --threads 1,2,4,8 --reps 7 [--temperature 0.8] [--max-new 64]
 """
 import sys
 import json
