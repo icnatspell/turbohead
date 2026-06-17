@@ -283,6 +283,66 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 ---
 
+## Qwen3-1.7B (int4 body) — 2026-06-17
+
+V=151936, D=2048, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 11.173.
+Int4 body = RTN. Wide hidden (2048) + the most layers of the set ⇒ smallest head share, so the flash
+win is the most modest measured (just under Llama, which shares D=2048 but has fewer layers).
+
+```bash
+bash turbohead/surgery/build_all.sh Qwen/Qwen3-1.7B qwen3_1_7b
+R=artifacts/qwen3_1_7b
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7                              # greedy
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
+uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.npy -P 256
+```
+
+### Quality (vs fp32 head, 1999 WikiText-2 positions)
+
+| head | top-1 agree | PPL |
+|---|---|---|
+| head16 (fp32-eq, ref) | 100.0% | 11.173 |
+| head8 g128 | **98.5%** | 11.168 |
+| head4 g128 | 93.4% | 11.295 |
+| head4 g32 | 94.8% | 11.201 |
+| flash onnx / fused (A / H) | 97.9% | 100.580 † |
+
+† Coverage 88.6% at P=256; *covered* PPL = 5.270.
+
+### Speed — greedy (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 9.4±0.8 (1.00×) | 14.7±0.3 (1.00×) | 16.3±0.3 (1.00×) | 16.5±0.3 (1.00×) |
+| head8 g128 | 15.5±0.1 (1.65×) | 24.3±0.2 (1.65×) | 28.4±0.4 (1.74×) | 28.4±0.3 (1.72×) |
+| head4 g128 | 16.8±0.2 (1.80×) | 25.5±1.0 (1.74×) | 31.8±0.2 (1.95×) | 31.0±2.3 (1.88×) |
+| head4 g32 | 16.3±0.2 (1.74×) | 25.6±0.3 (1.75×) | 30.5±0.4 (1.87×) | 30.4±0.3 (1.85×) |
+| flash onnx (A) | 17.7±0.1 (1.89×) | 27.3±0.5 (1.86×) | 32.7±0.4 (2.00×) | 32.5±0.4 (1.98×) |
+| **flash fused (H)** | **19.2±0.4 (2.05×)** | **29.1±0.4 (1.99×)** | **34.9±0.8 (2.14×)** | **35.3±0.4 (2.14×)** |
+
+### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 9.1±0.2 (1.00×) | 13.7±0.2 (1.00×) | 16.0±0.2 (1.00×) | 16.2±0.2 (1.00×) |
+| head8 g128 | 14.6±0.3 (1.60×) | 22.4±0.5 (1.63×) | 26.9±0.2 (1.69×) | 27.0±0.2 (1.67×) |
+| head4 g128 | 16.3±0.1 (1.79×) | 25.2±0.3 (1.83×) | 29.8±0.3 (1.87×) | 30.1±0.3 (1.86×) |
+| head4 g32 | 15.6±0.2 (1.71×) | 23.8±0.3 (1.73×) | 28.4±0.3 (1.78×) | 29.0±0.3 (1.79×) |
+| flash onnx (A) | 17.2±0.3 (1.88×) | 27.1±0.2 (1.97×) | 32.6±0.3 (2.04×) | 32.9±0.6 (2.03×) |
+| **flash fused (H)** | **19.2±0.2 (2.10×)** | **29.4±0.4 (2.14×)** | **34.9±0.4 (2.18×)** | **35.5±0.5 (2.19×)** |
+
+### Takeaways
+
+- Fused FlashHead **2.05× greedy / 2.10× sampling @1t** — the most modest win of the set, consistent
+  with the smallest head share (D=2048, 28 layers — most of the set). Still beats every dense head.
+- head8 g128 near-lossless (98.5%, fp32-equal PPL); flash 97.9% agreement, covered PPL 5.270.
+- Clustering note: this head's geometry stalled the balanced-assign rounds (left ~60% of the vocab to
+  the tail). Fixed in `build_clusters.py` — bail when rounds stall + block-vectorized tail fill.
+
+---
+
 ## Models pending
 
 Each is one `build_all.sh <hf-model> <slug>` then the three commands above. FlashHead's edge should
@@ -290,7 +350,6 @@ grow where the head is a larger share of decode (bigger V:D, fewer layers).
 
 | model | hf id | slug |
 |---|---|---|
-| Qwen3-1.7B | `Qwen/Qwen3-1.7B` | `qwen3_1_7b` |
 | Qwen3.5-0.8B | `Qwen/Qwen3.5-0.8B` | `qwen3_5_0_8b` |
 | LFM2.5-350M | `LiquidAI/LFM2.5-350M` | `lfm2_5_350m` |
 | h2o-danube3-500m-chat | `h2oai/h2o-danube3-500m-chat` | `danube3_500m` |
