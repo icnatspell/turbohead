@@ -1,5 +1,9 @@
 # FlashHead via ONNX Graph Surgery — Implementation Plan
 
+> **Status:** this is the original design/handoff spec; its `§N` section numbers are referenced from
+> code comments, so it's kept as-is. For **what was built and measured**, see
+> [RESULTS.md](RESULTS.md) (8-model matrix); for **current state + open items**, [NEXT_STEPS.md](NEXT_STEPS.md).
+
 **Goal:** Insert an approximate, clustering-based LM head ("FlashHead") into an **existing, already-quantized ONNX language model** by graph surgery, replacing the dense final vocabulary projection on the decode path. Start with the simplest correct version (greedy, batch size 1, decode-only) and build up. The first priority is to confirm a real latency benefit at the target model's dimensions and execution provider, then preserve it through integration.
 
 This document is a handoff spec for an implementing agent. It encodes the algorithm, the exact tensor layouts, the surgery procedure, validation gates, and the known gotchas. Reference: `embedl/flash-head` (vLLM plugin); arXiv 2603.14591. The vLLM plugin scaffolding (`patches/`, `__init__.py`, `loading.py`) does **not** transfer — only the algorithm and the offline clustering assets do.

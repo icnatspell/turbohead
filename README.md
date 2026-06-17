@@ -21,8 +21,18 @@ Each step touches `K` centroids plus `P·cap` candidate rows instead of all `V`.
 long as the true next token lands in the probed set; `P` controls that coverage.
 
 This repo targets CPU inference with ONNXRuntime: surgery to apply the method, a self-contained
-decode loop to run it, and gates to measure quality and speed. Design notes live in `docs/PLAN.md`,
-findings in `docs/NEXT_STEPS.md`.
+decode loop to run it, and gates to measure quality and speed.
+
+### Where things live
+
+| path | what |
+|---|---|
+| `turbohead/surgery/` | **offline** — apply the method. `build_all.sh` (one-command pipeline), `build_clusters.py` (balanced k-means), `build_subgraph.py` (the op-chain), `splice.py`, `quantize_head.py` (dense baselines) |
+| `turbohead/inference/decode_loop.py` | **deploy** — the only file needed to *run* a spliced model (raw ORT + numpy + tokenizer; also the profiler). Drives standard, hybrid, and embeds-in models |
+| `turbohead/eval/` | **gates** — `benchmark.py` (speed matrix), `head_quality.py` (agreement/PPL), `agreement.py`/`ppl.py` (spot-checks) |
+| `csrc/turbohead_op.cc` | the fused stage-2 custom CPU op (`build.sh` → `libturbohead.so`) |
+| `docs/RESULTS.md` | **the numbers** — 8-model speed×quality matrix + per-model reproduce commands |
+| `docs/NEXT_STEPS.md` | current state + open items · `docs/PLAN.md` design spec · `docs/ORT_QUIRKS.md` ORT CPU operator quirks |
 
 ---
 
@@ -54,21 +64,20 @@ full build log to `artifacts/<slug>/logs/`, and prints the bench/eval commands t
 body defaults to plain RTN (robust across architectures). Then run / measure with the `onnx` or
 `fused` dir — see [docs/RESULTS.md](docs/RESULTS.md) for the per-model command blocks.
 
-<details><summary>Or step by step (what <code>build_all.sh</code> runs)</summary>
+<details><summary>Or step by step (what <code>build_all.sh</code> runs, here for one model)</summary>
 
 ```bash
-# 1. build the int4/int8 baseline ONNX model   -> artifacts/<model>_int4_cpu/
-MODEL=Qwen/Qwen3-0.6B bash turbohead/surgery/convert_baseline.sh
-
-# 2. dump the bf16 head weight                 -> artifacts/head_W.npy
-uv run turbohead-extract-head
-
-# 3. balanced k-means clustering assets        -> artifacts/clusters.npz
-uv run turbohead-build-clusters                # default cap=16; or --cap 32 / --clusters 4748
-
-# 4. splice TurboHead into the model           -> artifacts/<model>_flash/
-uv run turbohead-splice --backend onnx  -P 256 --block-size 128   # portable (1,V) logits, contract A
-uv run turbohead-splice --backend fused -P 256 --block-size 128   # fused custom op, contract H (fastest)
+R=artifacts/qwen3_0_6b
+# 1. int4 baseline ONNX (genai model builder)
+MODEL=Qwen/Qwen3-0.6B OUT=$R/baseline bash turbohead/surgery/convert_baseline.sh
+# 2. dump the fp32 head weight (= tied embedding)
+uv run turbohead-extract-head   --model Qwen/Qwen3-0.6B --out $R/head_W.npy
+# 3. balanced k-means clustering assets        (cap=16; or --cap 32 / --clusters K)
+uv run turbohead-build-clusters --head $R/head_W.npy --out $R/clusters.npz --cap 16
+# 4. splice TurboHead in: portable (contract A) and fused (contract H, fastest)
+uv run turbohead-splice --backend onnx  --src $R/baseline --npz $R/clusters.npz --head $R/head_W.npy -P 256 --dst $R/onnx
+uv run turbohead-splice --backend fused --src $R/baseline --npz $R/clusters.npz --head $R/head_W.npy -P 256 --dst $R/fused
+# (build_all also builds dense-head baselines via turbohead-quantize-head --bits {16,8,4} for comparison)
 ```
 </details>
 
@@ -104,7 +113,9 @@ out, tok_s = dec.generate(ids, max_new=64)            # temperature=0.0 greedy; 
 print(dec.tok.decode(out))
 ```
 
-The loop auto-detects the head contract (A = logits-out, B = token-out) and manages the KV cache.
+The loop auto-detects the head contract (**A** = full `(1,V)` logits, the `onnx` backend; **H** = the
+fused op's candidate shortlist, the `fused` backend; B = token-out) and the KV/SSM state layout — so
+it drives standard, hybrid (conv/SSM + attention), and embeddings-in models with no per-model config.
 
 | flag | default | what it does |
 |---|---|---|
@@ -116,20 +127,30 @@ The loop auto-detects the head contract (A = logits-out, B = token-out) and mana
 | `--prompt STR` | demo text | input prompt |
 | `--profile` | off | dump the per-op breakdown (see below) |
 
-### Measuring quality
+### Measuring speed and quality
 
-Two views, both against the original dense head on WikiText-2:
+Two reusable harnesses, both run per-model against the dense head on WikiText-2:
 
 ```bash
-uv run turbohead-agreement --npz artifacts/clusters.npz    # top-1 agreement vs dense argmax (sweeps P)
-uv run turbohead-ppl       --npz artifacts/clusters.npz    # dense vs flash perplexity + coverage
+R=artifacts/qwen3_0_6b
+# speed matrix: decode tok/s, median±std over reps, each head in its own subprocess
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused --threads 1,2,4,8 --reps 7
+uv run turbohead-bench $R/... --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling regime
+# quality matrix: top-1 agreement + WikiText PPL vs the fp32 head, per head variant
+uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.npy -P 256
 ```
 
-- **Top-1 agreement** counts how often TurboHead's argmax matches the dense head's. Greedy deploys
-  care about this number.
-- **Coverage** is the fraction of true next-tokens that land inside the probed candidate set, the
-  recall ceiling. Raise `-P` to lift it. Coverage caps full-distribution PPL: a target outside the
-  set gets ≈0 probability, so read the two together.
+`build_all.sh` prints these three lines pre-filled for the model you built. Reading the numbers:
+
+- **Top-1 agreement** — how often TurboHead's argmax matches the dense head's. Greedy deploys care
+  about this; it's the **cross-model-comparable** quality metric.
+- **Coverage** — fraction of true next-tokens inside the probed candidate set (the recall ceiling).
+  Raise `-P` to lift it. Coverage caps full-distribution PPL: an uncovered target gets ≈0 probability,
+  so read the two together — and read **PPL only within a model** (absolute PPL varies by tokenizer/
+  base-model; WikiText is detokenized before scoring).
+
+(`turbohead-agreement --npz <clusters.npz>` and `turbohead-ppl --npz <clusters.npz>` are lighter
+single-model spot-checks of just the flash head.)
 
 ### Profiling
 
@@ -190,7 +211,7 @@ speedup:
 
 Speedup is vs `head16` (an fp32 dense head on the same int4 body) at the same thread count; fused flash
 also beats every *quantized* dense head (incl. int4) on both speed and agreement. Full tables — all
-five models, 1/2/4/8 threads, greedy + sampling, agreement + PPL + coverage — in
+eight models, 1/2/4/8 threads, greedy + sampling, agreement + PPL + coverage — in
 **[docs/RESULTS.md](docs/RESULTS.md)**. More threads shrink the speedup (the head is memory-bound and
 extra cores also speed the dense baseline), so single-threaded is the intended deploy point.
 
