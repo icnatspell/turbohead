@@ -58,17 +58,25 @@ def balanced_assign(X, C, cap, max_rounds=25):
         logger.info(f"round {r}: assigned {acc_tokens.size}, remaining {active.size}")
         if active.size == 0:
             break
-    # tail: sequential greedy fill (small remainder; rounds stall here otherwise)
+        # ponytail: bail once rounds stall (some heads, e.g. Qwen3-1.7B, drop to ~cap/round and
+        # leave most of the vocab — the block tail below places the remainder far faster).
+        if acc_tokens.size <= 4 * cap:
+            break
+    # tail: greedy nearest-free fill of the remainder. Score a BLOCK of tokens against all centroids
+    # in one matmul (then mask full clusters) instead of a per-token gemv that re-copies C[free_c]
+    # every iteration — the remainder can be most of the vocab when the rounds stall.
     if active.size:
         logger.info(f"sequential finish for {active.size} tokens")
-        free_c = np.where(free > 0)[0]
-        for tok in active:
-            sc = X[tok] @ C[free_c].T - 0.5 * cnorm2[free_c]
-            c = free_c[sc.argmax()]
-            assign[tok] = c
-            free[c] -= 1
-            if free[c] == 0:
-                free_c = np.where(free > 0)[0]
+        for i in range(0, active.size, CHUNK):
+            blk = active[i : i + CHUNK]
+            sc = X[blk] @ C.T - 0.5 * cnorm2  # (blk, K)
+            sc[:, free == 0] = -np.inf
+            for j, tok in enumerate(blk):
+                c = int(sc[j].argmax())
+                assign[tok] = c
+                free[c] -= 1
+                if free[c] == 0:
+                    sc[:, c] = -np.inf  # close cluster for the rest of this block
     assert (free == 0).all() and np.bincount(assign, minlength=K).min() == cap
     return assign
 
