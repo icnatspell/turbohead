@@ -3,6 +3,25 @@
 Per-model head-precision comparison: **is FlashHead worth it vs just quantizing the dense head?**
 One section per model; add new models by appending a section in the same shape.
 
+## Summary — all models
+
+Fused FlashHead (contract H) decode speedup **vs the fp32-equivalent dense head** (`head16`), single
+thread, int4 body. Sorted by greedy speedup. The win tracks the head's share of a decode step: narrow
+hidden `D` + large vocab `V` + few layers ⇒ the head dominates ⇒ bigger speedup.
+
+| model | D | V | layers | fused greedy @1t | fused sampling @1t | flash agree | coverage | head8g128 agree |
+|---|---|---|---|---|---|---|---|---|
+| Gemma3-270M | 640 | 262k | 18 | **5.37×** | **6.08×** | 95.2% | 87.6% | 98.3% |
+| Gemma3-1B | 1152 | 262k | 26 | **3.04×** | **3.08×** | 94.4% | 85.6% | 97.9% |
+| Qwen3-0.6B | 1024 | 152k | 28 | **2.40×** | **2.45×** | 97.6% | 88.5% | 98.5% |
+| Llama-3.2-1B | 2048 | 128k | 16 | **2.09×** | **2.08×** | 96.9% | 90.8% | 99.3% |
+| Qwen3-1.7B | 2048 | 152k | 28 | **2.05×** | **2.10×** | 97.9% | 88.6% | 98.5% |
+
+Constant across the set: **fused flash beats every dense quant head** (incl. int4) on both speed and
+greedy agreement at every thread count; **`head8 g128`** is the dense quality sweet spot (≈98–99%
+agreement, fp32-equal PPL) when you need calibrated full-vocab probabilities; flash full-distribution
+PPL is coverage-limited (raise `-P`). Per-model speed×thread×regime tables and reproduce commands below.
+
 ## Reproduce a model from scratch
 
 One command builds every artifact for a model into its own `artifacts/<slug>/` dir (genai int4

@@ -40,11 +40,25 @@ measure it. The `dev` group adds ruff, pytest, and pyrefly for contributors.
 
 ### Offline: apply TurboHead to your model
 
-A one-time transform that turns a quantized base model into a spliced `…_flash/` ONNX dir.
+A one-time transform that turns a Hugging Face model into spliced ONNX dirs. **One command** builds
+the whole artifact tree for a model — int4 baseline → head weight → clusters → dense-head variants →
+two flash splices (portable `onnx`, fused custom-op `fused`) — into its own reusable `artifacts/<slug>/`:
+
+```bash
+bash turbohead/surgery/build_all.sh <hf-model> <slug>      # e.g. Qwen/Qwen3-0.6B qwen3_0_6b
+# -> artifacts/<slug>/{baseline, head_W.npy, clusters.npz, head{16,8g128,4g128,4g32}, onnx, fused, logs}
+```
+
+It's idempotent (re-running reuses the slow genai baseline + clustering unless `FORCE=1`), tees the
+full build log to `artifacts/<slug>/logs/`, and prints the bench/eval commands to run next. The int4
+body defaults to plain RTN (robust across architectures). Then run / measure with the `onnx` or
+`fused` dir — see [docs/RESULTS.md](docs/RESULTS.md) for the per-model command blocks.
+
+<details><summary>Or step by step (what <code>build_all.sh</code> runs)</summary>
 
 ```bash
 # 1. build the int4/int8 baseline ONNX model   -> artifacts/<model>_int4_cpu/
-bash turbohead/surgery/convert_baseline.sh
+MODEL=Qwen/Qwen3-0.6B bash turbohead/surgery/convert_baseline.sh
 
 # 2. dump the bf16 head weight                 -> artifacts/head_W.npy
 uv run turbohead-extract-head
@@ -53,8 +67,10 @@ uv run turbohead-extract-head
 uv run turbohead-build-clusters                # default cap=16; or --cap 32 / --clusters 4748
 
 # 4. splice TurboHead into the model           -> artifacts/<model>_flash/
-uv run turbohead-splice -P 256 --stage1 int4 --block-size 128
+uv run turbohead-splice --backend onnx  -P 256 --block-size 128   # portable (1,V) logits, contract A
+uv run turbohead-splice --backend fused -P 256 --block-size 128   # fused custom op, contract H (fastest)
 ```
+</details>
 
 `turbohead-build-clusters` sets the clustering. Pick `--cap` or `--clusters`, not both:
 
@@ -77,12 +93,12 @@ only these two flags shape inference:
 The deploy path: a raw-`onnxruntime` greedy/sampling loop with a manual KV cache. No genai, no torch.
 
 ```bash
-uv run turbohead-decode artifacts/<model>_flash --reps 5
+uv run turbohead-decode artifacts/<slug>/fused --reps 5      # or .../onnx for the portable backend
 ```
 
 ```python
 from turbohead.inference.decode_loop import Decoder
-dec = Decoder("artifacts/<model>_flash", threads=1)   # dims/contract/tokenizer auto-detected
+dec = Decoder("artifacts/<slug>/fused", threads=1)    # dims/contract/tokenizer auto-detected
 ids = dec.tok("Once upon a time,")["input_ids"]
 out, tok_s = dec.generate(ids, max_new=64)            # temperature=0.0 greedy; >0 samples
 print(dec.tok.decode(out))
@@ -120,34 +136,69 @@ uv run turbohead-ppl       --npz artifacts/clusters.npz    # dense vs flash perp
 The decode loop doubles as a per-op profiler (ORT `enable_profiling`):
 
 ```bash
-uv run turbohead-decode artifacts/<model>_flash --reps 5 --profile
+uv run turbohead-decode artifacts/<slug>/fused --reps 5 --profile
 ```
 
 It prints prefill and decode `model_run` medians, a per-op-type breakdown (ms/step, % of node time,
 call count), and a head-path rollup, so you see where each decode step spends its time.
 
-## Results: Qwen3-0.6B, CPU, ONNXRuntime
+## Backends: portable ONNX vs fused custom op
 
-Reference config: `Qwen/Qwen3-0.6B` (`V=151936`, `D=1024`), int4 body / int8 dense head baseline,
-balanced clustering `cap=16 → K=9496` (no padding), `P=256`, stage-1 int4 `MatMulNBits`. Single
-socket, `onnxruntime` CPU EP.
+`turbohead-splice` emits one of two head implementations. Both share the same clustering math and
+produce identical quality; the decode loop auto-detects which one a model uses from its graph outputs.
 
-### Speed
+- **`--backend onnx` (contract A)** — pure ONNX standard ops (`MatMulNBits` → `TopK` → `Gather` →
+  matmul → `ScatterElements`), producing full `(1, V)` logits. Runs on any stock `onnxruntime`, no
+  native code. The portable path.
+- **`--backend fused` (contract H)** — same stage 1, but stage 2 collapses into a single custom CPU
+  op, `turbohead::FlashHeadSelect` (`csrc/turbohead_op.cc`, ~80 lines). The fastest path.
 
-| | 1 thread | 4 threads |
-|---|---|---|
-| **Decode speedup vs int4 baseline** | **1.21×** | **1.19×** |
+### The fused kernel
 
-More threads shrink the gap: the head is memory-bound, and extra cores speed up the baseline's dense
-head too. Sampling widens it to ~1.35×, where the dense baseline pays a full-vocab softmax every step
-that TurboHead skips.
+The spliced stage-2 op-chain (Gather the `P·cap` candidate rows → MatMul with `h` → Concat the
+always-scored specials → Scatter into a `(1, V)` buffer) is several ops that each materialize an
+intermediate — the costly one being the `(P·cap, D)` gather. The custom op collapses all of it into
+one pass: for each probed cluster it dots that cluster's `cap` weight rows with `h` straight out of
+`Wperm`, reading each candidate row exactly once with no `(P·cap, D)` materialization, and emits just
+the **candidate shortlist** — `cand_logits` + `cand_ids` for the ~`P·cap` scored tokens. Python then
+takes an argmax (greedy) or a softmax over the shortlist (sampling), skipping the full `(1, V)` logits,
+the scatter, and the full-vocab softmax the dense head pays — which is why sampling speeds up even more
+than greedy.
 
-### Where the speedup comes from (per decode step, 1 thread, `--profile`)
+The kernel is header-only against the ORT C/C++ custom-op API (no `libonnxruntime` link), built by
+`bash csrc/build.sh` → `csrc/libturbohead.so`; `build_all.sh` compiles it once and ships a copy in each
+`fused/` dir, and the decode loop registers it via `SessionOptions.register_custom_ops_library`. The
+dot-product loop is deliberately **single-threaded**: it streams ~`P·cap·D·4` ≈ 17 MB of weight rows
+per step, so it's memory-bandwidth-bound and one thread already saturates the bandwidth that matters
+(`-ffast-math` lets the reduction auto-vectorize; OpenMP over the clusters tested *slower* — fork/join
++ oversubscription against ORT's idle threads). The body's heavy matmuls still use all ORT threads;
+this ~2 ms head isn't where the cores are needed.
 
-TurboHead changes only the head; body and attention stay the same. It swaps the dense int8 head
-(~7.9 ms) for the flash head (~3.3 ms):
+## Results
 
-| component | baseline | TurboHead |
+Across five models on the CPU EP, fused TurboHead decodes **2.05×–5.37× faster than an fp32-equivalent
+dense head** at one thread, while matching its greedy next-token choice 95–98% of the time. The win
+scales with the head's share of a decode step — narrow hidden `D`, large vocab `V`, few layers ⇒ the
+head dominates ⇒ bigger speedup:
+
+| model | D / V / layers | fused greedy @1t | fused sampling @1t | flash top-1 agree |
+|---|---|---|---|---|
+| Gemma3-270M | 640 / 262k / 18 | **5.37×** | **6.08×** | 95.2% |
+| Qwen3-0.6B | 1024 / 152k / 28 | **2.40×** | **2.45×** | 97.6% |
+| Qwen3-1.7B | 2048 / 152k / 28 | **2.05×** | **2.10×** | 97.9% |
+
+Speedup is vs `head16` (an fp32 dense head on the same int4 body) at the same thread count; fused flash
+also beats every *quantized* dense head (incl. int4) on both speed and agreement. Full tables — all
+five models, 1/2/4/8 threads, greedy + sampling, agreement + PPL + coverage — in
+**[docs/RESULTS.md](docs/RESULTS.md)**. More threads shrink the speedup (the head is memory-bound and
+extra cores also speed the dense baseline), so single-threaded is the intended deploy point.
+
+### Anatomy of a decode step (Qwen3-0.6B, 1 thread, `--profile`)
+
+TurboHead changes only the head; body and attention stay the same. Against genai's default int8 dense
+head, it swaps a ~7.9 ms head for a ~3.3 ms one:
+
+| component | dense head | TurboHead |
 |---|---|---|
 | transformer body (`MatMulNBits`, int4) | ~15.1 ms | ~15.2 ms |
 | attention (`GroupQueryAttention`) | 2.08 ms | 2.04 ms |
@@ -157,25 +208,27 @@ TurboHead changes only the head; body and attention stay the same. It swaps the 
 | **head, stage-2 dot + topk/scatter** | — | ~1.65 ms |
 | **decode step total** | **26.55 ms** | **22.63 ms** |
 
-The head drops from 7.9 ms to 3.3 ms. The stage-2 Gather (1.49 ms) and dot (1.46 ms) dominate what
-remains; int4 already shrank stage-1 to ~0.16 ms. Amdahl sets the ceiling: the head was ~30% of the
-step, so even a free head caps the speedup at ~1.33×.
+The stage-2 Gather (1.49 ms) and dot (1.46 ms) dominate what remains in the standard-op path; int4
+already shrank stage-1 to ~0.16 ms, and the fused kernel folds the gather away entirely. Amdahl sets
+the ceiling on *this* baseline: with the head at ~30% of the step, even a free head caps the speedup at
+~1.33× vs the int8 head — the larger headline numbers above are measured against an fp32 head, which is
+itself slower.
 
-### Quality (vs dense head, WikiText-2)
+### Quality (Qwen3-0.6B, vs dense head, WikiText-2)
 
 | metric | value | meaning |
 |---|---|---|
 | **Top-1 agreement** (P=256) | **97.6%** | greedy next-token matches the dense head |
 | Standalone subgraph argmax | **100%** | int4 stage-1 preserves argmax vs the fp16 reference |
-| Candidate coverage (P=256) | 89.4% | true token sits inside the probed set; rises with P |
-| Dense PPL / coverage-limited flash PPL | 10.9 / 82.6 | full-distribution PPL tracks coverage |
+| Candidate coverage (P=256) | 88.5% | true token sits inside the probed set; rises with P |
+| Dense / covered / full-dist flash PPL | 13.5 / 6.4 / 121.9 | full-distribution PPL tracks coverage |
 
-Greedy decoding, what most deploys use, holds 97.6% agreement with no measurable quality loss on
-deterministic prompts. Coverage explains the full-distribution PPL gap: ~10% of targets fall outside
-the P=256 candidate set and get ≈0 probability. Raising `P` trades speed for coverage; we run `P=256`
-on CPU.
+Greedy decoding — what most deploys use — holds 97.6% agreement with no measurable quality loss on
+deterministic prompts. Coverage explains the full-distribution PPL gap: ~11% of targets fall outside
+the P=256 candidate set and get ≈0 probability (the *covered* PPL, where the target is in the set, is
+6.4). Raising `P` trades speed for coverage; we run `P=256` on CPU.
 
 > int4 stage-1 carries the precision win. Stage-1 centroid scoring (the dominant head gemv at M=1)
-> runs as int4 `MatMulNBits` (W4A16, `accuracy_level=4`), 9× faster than fp16 on that gemv while
+> runs as int4 `MatMulNBits` (W4A16, `accuracy_level=4`), ~9× faster than fp16 on that gemv while
 > holding 100% standalone argmax. Earlier int4 attempts through `MatMulInteger` and manual dequant
 > ran slower; `MatMulNBits` fuses dequant into the gemv and is the only int gemv that wins at M=1.
