@@ -95,14 +95,24 @@ class Decoder:
         self.n_layers = len(keys)
         self.kv_heads, self.head_size = (int(keys[0].shape[1]), int(keys[0].shape[3])) if keys else (0, 0)
 
-        # Token feed: standard + input_ids-based hybrids feed input_ids; some hybrids (Qwen3.5)
-        # split the embedding out and want inputs_embeds + a 3-D position_ids, which we don't run.
-        extra = self.in_names - {"input_ids", "attention_mask"} - set(self.state_seed)
-        if "input_ids" not in self.in_names or extra:
-            raise NotImplementedError(
-                f"{self.dir}: graph needs {sorted(extra) or ['inputs_embeds']} beyond "
-                "input_ids+attention_mask+state — embeds/position_ids feeds unsupported "
-                "(works for input_ids-based hybrids like LFM2; Qwen3.5 splits the embedding out)")
+        # Token feed: most graphs take input_ids; some (Qwen3.5) split the embedding lookup out and
+        # want inputs_embeds — we do the lookup in numpy from the tied embedding (= head_W) — plus a
+        # position_ids (Qwen3.5's is 3-D, M-RoPE; for text all channels = the absolute position).
+        extra = (self.in_names - {"input_ids", "inputs_embeds", "attention_mask", "position_ids"}
+                 - set(self.state_seed))
+        if extra or not ({"input_ids", "inputs_embeds"} & self.in_names):
+            raise NotImplementedError(f"{self.dir}: unsupported graph inputs {sorted(extra)} "
+                                      "(need input_ids or inputs_embeds, + attention_mask + state)")
+        self.embeds_in = "inputs_embeds" in self.in_names
+        self.wants_position_ids = "position_ids" in self.in_names
+        self.pos_rank = next((len(i.shape) for i in self.sess.get_inputs()
+                              if i.name == "position_ids"), 0)
+        if self.embeds_in:  # tied-embedding lookup matrix: model dir, else build_all's artifacts/<slug>/
+            ep = next((p for p in (f"{self.dir}/embed.npy", f"{self.dir}/../head_W.npy")
+                       if os.path.exists(p)), None)
+            if not ep:
+                raise FileNotFoundError(f"{self.dir}: inputs_embeds graph needs embed.npy or ../head_W.npy")
+            self.embed = np.load(ep, mmap_mode="r")  # [V,D] tied embed; fancy-index gathers token rows
 
         # Contract: A emits full `logits` (1,V); H emits the candidate shortlist
         # (cand_logits, cand_ids) from the fused op; B emits the token id directly.
@@ -125,10 +135,19 @@ class Decoder:
     def _empty_past(self):
         return dict(self.state_seed)
 
-    def _step(self, input_ids, attn, past):
-        od = dict(zip(self.out_names,
-                      self.sess.run(None, {"input_ids": input_ids,
-                                           "attention_mask": attn, **past})))
+    def _pos(self, start, k):
+        """position_ids for the k tokens at absolute positions [start, start+k). Matches the graph's
+        declared rank — 3 = Qwen3.5 M-RoPE [3,1,k] (text: all channels equal), else 2-D [1,k]."""
+        p = np.arange(start, start + k, dtype=np.int64)
+        return np.broadcast_to(p, (3, 1, k)).copy() if self.pos_rank == 3 else p.reshape(1, k)
+
+    def _step(self, tokens, attn, past, start):
+        # tokens: int64 (1,k). embeds-in graphs get inputs_embeds = tied-embed rows; else input_ids.
+        x = self.embed[tokens].astype(np.float32, copy=False) if self.embeds_in else tokens
+        feeds = {("inputs_embeds" if self.embeds_in else "input_ids"): x, "attention_mask": attn, **past}
+        if self.wants_position_ids:
+            feeds["position_ids"] = self._pos(start, tokens.shape[1])
+        od = dict(zip(self.out_names, self.sess.run(None, feeds)))
         past = {name: od[pres] for name, pres in self.present_for.items()}
         return past, od
 
@@ -166,14 +185,14 @@ class Decoder:
         ids = list(prompt_ids)
         n0 = len(ids)
         past, od = self._step(np.array([ids], np.int64),
-                               np.ones((1, len(ids)), np.int64), self._empty_past())
+                               np.ones((1, len(ids)), np.int64), self._empty_past(), 0)
         nxt = self._select(od, temperature, rng)
         ids.append(nxt)
         t1 = time.perf_counter()
         gen = 1
         while nxt not in self.eos and gen < max_new:
             past, od = self._step(np.array([[nxt]], np.int64),
-                                   np.ones((1, len(ids)), np.int64), past)
+                                   np.ones((1, len(ids)), np.int64), past, len(ids) - 1)
             nxt = self._select(od, temperature, rng)
             ids.append(nxt)
             gen += 1

@@ -8,6 +8,7 @@ from turbohead.inference.decode_loop import Decoder
 MODEL = "artifacts/qwen3_0_6b/onnx"    # contract-A (onnx backend)
 FUSED = "artifacts/qwen3_0_6b/fused"   # contract-H (fused custom op)
 HYBRID = "artifacts/lfm2_5_350m/fused"  # hybrid (conv + sparse-index attention) — generic state path
+EMBEDS = "artifacts/qwen3_5_0_8b/fused"  # embeds-in (split embedding) + 3-D M-RoPE position_ids
 
 
 def test_zero_state_seeds_kv_and_recurrent_shapes():
@@ -30,6 +31,16 @@ def test_hybrid_model_decodes():
     """Hybrid model (interleaved conv + sparse-index attention layers) decodes via the generic
     state path — regression guard for the past_conv.* / past_key_values.N.* seeding + remap."""
     dec = Decoder(HYBRID, threads=1)
+    out, tps = dec.generate(dec.tok("Once upon a time,")["input_ids"], max_new=8)
+    assert out and tps > 0
+
+
+@pytest.mark.skipif(not os.path.isdir(EMBEDS), reason=f"{EMBEDS} not built")
+def test_embeds_in_model_decodes():
+    """inputs_embeds graph (tied-embedding lookup done in numpy from head_W) + 3-D M-RoPE
+    position_ids decodes — regression guard for the embeds-in feed path."""
+    dec = Decoder(EMBEDS, threads=1)
+    assert dec.embeds_in and dec.pos_rank == 3
     out, tps = dec.generate(dec.tok("Once upon a time,")["input_ids"], max_new=8)
     assert out and tps > 0
 

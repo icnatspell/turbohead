@@ -13,17 +13,18 @@ hidden `D` + large vocab `V` + few layers ⇒ the head dominates ⇒ bigger spee
 |---|---|---|---|---|---|---|---|---|
 | Gemma3-270M | 640 | 262k | 18 | **5.37×** | **6.08×** | 95.2% | 87.6% | 98.3% |
 | Gemma3-1B | 1152 | 262k | 26 | **3.04×** | **3.08×** | 94.4% | 85.6% | 97.9% |
+| Qwen3.5-0.8B ‡ | 1024 | 248k | 24 | **2.82×** | **2.75×** | 96.7% | 86.4% | 98.9% |
 | Qwen3-0.6B | 1024 | 152k | 28 | **2.40×** | **2.45×** | 97.6% | 88.5% | 98.5% |
 | Llama-3.2-1B | 2048 | 128k | 16 | **2.09×** | **2.08×** | 96.9% | 90.8% | 99.3% |
 | Qwen3-1.7B | 2048 | 152k | 28 | **2.05×** | **2.10×** | 97.9% | 88.6% | 98.5% |
 | LFM2.5-350M ‡ | 1024 | 65k | 16 | **1.84×** | **2.04×** | 98.2% | 77.4% | 99.0% |
 | h2o-danube3-500m | 1536 | 32k | 16 | **1.45×** | **1.21×** | 94.5% | 90.8% | 99.6% |
 
-‡ **Hybrid** (short-conv + sparse attention) — benched end-to-end after the decode loop learned generic
-state handling. Quality-only (speed N/A): **Qwen3.5-0.8B** (hybrid Mamba/attention that splits the
-embedding out — needs `inputs_embeds`/3-D `position_ids`, not yet supported; flash 96.7% agree,
-head8g128 98.9%). The tiny-vocab **danube3** sits at the low end — its head is a small share of decode,
-so flash barely leads dense heads; see its `P`-sensitivity note below.
+‡ **Hybrid** models (SSM/conv state interleaved with sparse attention), benched end-to-end via the
+generalized decode loop. **Qwen3.5-0.8B** also splits the embedding out (needs `inputs_embeds` + 3-D
+M-RoPE `position_ids`), handled by the loop's embeds-in path. The tiny-vocab **danube3** sits at the
+low end — its head is a small share of decode, so flash barely leads dense heads; see its
+`P`-sensitivity note below.
 
 Constant across the set: **fused flash beats every dense quant head** (incl. int4) on both speed and
 greedy agreement at every thread count; **`head8 g128`** is the dense quality sweet spot (≈98–99%
@@ -370,26 +371,26 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 ---
 
-## Qwen3.5-0.8B (int4 body) — 2026-06-17 — quality only, speed N/A
+## Qwen3.5-0.8B (int4 body) — 2026-06-17
 
-V=248320, D=1024, 24 layers. FlashHead: cap=16, K=15520, P=256. Reference PPL (fp32 head) = 12.499.
+V=248320, D=1024, 24 layers (**hybrid Mamba/attention** — mostly SSM `conv_state`/`recurrent_state`,
+only every 4th layer is attention). FlashHead: cap=16, K=15520, P=256. Reference PPL (fp32 head) =
+12.499. The widest vocab-to-hidden ratio of the set (V:D=242) on top of a light SSM body ⇒ the head is
+a large share of decode, so the flash win is among the biggest measured.
 
-**Speed could not be measured.** Qwen3.5-0.8B is a **hybrid Mamba/attention** model: most layers carry
-`conv_state` + `recurrent_state` (SSM state) and only every 4th layer (indices 3, 7, 11, 15, 19, 23)
-has real `past_key_values.*.key/value` attention; the graph is also driven by `inputs_embeds` + a 3-D
-`position_ids` rather than `input_ids`. The FlashHead **splice itself works** (graph loads, emits
-`logits`/`cand_logits` like any other), but `inference/decode_loop.py` is a minimal raw-ORT loop for
-**standard uniform-KV transformers** and cannot drive hybrid SSM state — so `turbohead-bench` fails to
-instantiate the `Decoder`. Generalizing the loop to hybrid state is out of scope for this head study.
-
-Head **quality** is architecture-independent (it runs the HF model for hidden states + the extracted
-head subgraph, not the decode loop), so those numbers are valid and recorded below.
+This model splits the embedding lookup out — it's driven by `inputs_embeds` + a 3-D (M-RoPE)
+`position_ids`, not `input_ids`. The decode loop now supports that: it does the embedding lookup in
+numpy from the tied embedding (`head_W`) and builds the 3-D position_ids itself (`embeds_in` path),
+so it benches end-to-end despite the hybrid SSM state. (Earlier this model was quality-only.)
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3.5-0.8B qwen3_5_0_8b   # build + splice succeed
-uv run turbohead-head-quality --src artifacts/qwen3_5_0_8b \
-    --npz artifacts/qwen3_5_0_8b/clusters.npz --head artifacts/qwen3_5_0_8b/head_W.npy -P 256
-# turbohead-bench errors: decode_loop expects past_key_values.0.key (hybrid arch has none)
+bash turbohead/surgery/build_all.sh Qwen/Qwen3.5-0.8B qwen3_5_0_8b
+R=artifacts/qwen3_5_0_8b
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7                              # greedy
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
+uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.npy -P 256
 ```
 
 ### Quality (vs fp32 head, 1999 WikiText-2 positions)
@@ -402,8 +403,36 @@ uv run turbohead-head-quality --src artifacts/qwen3_5_0_8b \
 | head4 g32 | 92.7% | 12.585 |
 | flash onnx / fused (A / H) | 96.7% | 191.515 † |
 
-† Coverage 86.4% at P=256; *covered* PPL = 5.645. Clustering quality is in line with the
-standard-transformer models — the head method transfers fine; only the runtime harness doesn't.
+† Coverage 86.4% at P=256; *covered* PPL = 5.645.
+
+### Speed — greedy (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 14.5±0.2 (1.00×) | 21.9±0.2 (1.00×) | 24.2±1.5 (1.00×) | 24.4±0.4 (1.00×) |
+| head8 g128 | 27.1±0.2 (1.87×) | 39.8±0.4 (1.82×) | 46.2±0.3 (1.91×) | 46.1±0.4 (1.89×) |
+| head4 g128 | 32.2±0.3 (2.22×) | 45.2±1.0 (2.07×) | 52.7±0.7 (2.18×) | 54.2±0.9 (2.22×) |
+| head4 g32 | 29.9±1.2 (2.06×) | 43.3±1.7 (1.98×) | 50.0±0.6 (2.07×) | 50.2±0.4 (2.05×) |
+| flash onnx (A) | 37.3±0.5 (2.57×) | 51.7±1.3 (2.36×) | 59.7±0.9 (2.47×) | 59.7±0.5 (2.44×) |
+| **flash fused (H)** | **40.8±0.5 (2.82×)** | **55.8±1.0 (2.55×)** | **64.1±1.3 (2.65×)** | **63.8±0.8 (2.61×)** |
+
+### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 13.8±0.2 (1.00×) | 20.6±0.2 (1.00×) | 22.5±0.2 (1.00×) | 22.8±0.2 (1.00×) |
+| head8 g128 | 23.9±0.3 (1.73×) | 33.7±0.9 (1.64×) | 39.1±2.3 (1.74×) | 40.1±0.2 (1.76×) |
+| head4 g128 | 28.2±0.4 (2.04×) | 39.4±0.9 (1.92×) | 45.5±0.5 (2.02×) | 46.0±0.3 (2.02×) |
+| head4 g32 | 26.8±0.6 (1.94×) | 37.1±1.2 (1.80×) | 43.8±1.1 (1.95×) | 42.1±2.0 (1.85×) |
+| flash onnx (A) | 33.6±0.9 (2.43×) | 43.2±3.8 (2.10×) | 57.3±1.0 (2.55×) | 55.7±1.2 (2.44×) |
+| **flash fused (H)** | **38.1±0.3 (2.75×)** | **51.4±1.1 (2.50×)** | **57.8±2.2 (2.57×)** | **58.9±0.8 (2.58×)** |
+
+### Takeaways
+
+- Fused FlashHead **2.82× greedy / 2.75× sampling @1t** — third-highest of the set, behind only the
+  big-vocab Gemmas. The huge vocab (V:D=242) and the light SSM body make the head a dominant share.
+- First **embeds-in** model benched end-to-end. head8 g128 near-lossless (98.9%, fp32-equal PPL); flash
+  96.7% agreement, covered PPL 5.645. The head method transfers cleanly to the hybrid arch.
 
 ---
 
@@ -577,10 +606,10 @@ Caveats:
 
 Open items, roughly in priority order:
 
-1. **Embeds-in decode path → unlock Qwen3.5-0.8B speed.** Teach `decode_loop.py` to feed `inputs_embeds`
-   (look the token up in the tied embedding = `head_W`, for tied models) and a 3-D `position_ids`
-   (M-RoPE layout `[3, batch, seq]`). That's the only thing blocking a full speed row for the one
-   remaining quality-only model; the splice + state handling already work for it.
+1. ~~Embeds-in decode path → unlock Qwen3.5-0.8B speed.~~ **Done** (2026-06-17): `decode_loop.py`
+   feeds `inputs_embeds` (numpy lookup in the tied embedding `head_W`) + a 3-D M-RoPE `position_ids`.
+   Qwen3.5-0.8B now benches end-to-end (fused 2.82× greedy @1t). For a self-contained deploy, splice
+   could ship a fp16 `embed.npy` in the model dir instead of falling back to `../head_W.npy`.
 2. **Fix the head-quality PPL harness for hybrids.** LFM2.5's absolute PPL is ~100× off (dense ref
    ~1071) while top-1 agreement is fine — the harness is almost certainly capturing pre-final-norm /
    mis-scaled hidden states for these archs. Argmax is scale-invariant so the speedup/agreement story
