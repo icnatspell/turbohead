@@ -362,16 +362,52 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 ---
 
+## Qwen3.5-0.8B (int4 body) — 2026-06-17 — quality only, speed N/A
+
+V=248320, D=1024, 24 layers. FlashHead: cap=16, K=15520, P=256. Reference PPL (fp32 head) = 12.499.
+
+**Speed could not be measured.** Qwen3.5-0.8B is a **hybrid Mamba/attention** model: most layers carry
+`conv_state` + `recurrent_state` (SSM state) and only every 4th layer (indices 3, 7, 11, 15, 19, 23)
+has real `past_key_values.*.key/value` attention; the graph is also driven by `inputs_embeds` + a 3-D
+`position_ids` rather than `input_ids`. The FlashHead **splice itself works** (graph loads, emits
+`logits`/`cand_logits` like any other), but `inference/decode_loop.py` is a minimal raw-ORT loop for
+**standard uniform-KV transformers** and cannot drive hybrid SSM state — so `turbohead-bench` fails to
+instantiate the `Decoder`. Generalizing the loop to hybrid state is out of scope for this head study.
+
+Head **quality** is architecture-independent (it runs the HF model for hidden states + the extracted
+head subgraph, not the decode loop), so those numbers are valid and recorded below.
+
+```bash
+bash turbohead/surgery/build_all.sh Qwen/Qwen3.5-0.8B qwen3_5_0_8b   # build + splice succeed
+uv run turbohead-head-quality --src artifacts/qwen3_5_0_8b \
+    --npz artifacts/qwen3_5_0_8b/clusters.npz --head artifacts/qwen3_5_0_8b/head_W.npy -P 256
+# turbohead-bench errors: decode_loop expects past_key_values.0.key (hybrid arch has none)
+```
+
+### Quality (vs fp32 head, 1999 WikiText-2 positions)
+
+| head | top-1 agree | PPL |
+|---|---|---|
+| head16 (fp32-eq, ref) | 100.0% | 12.499 |
+| head8 g128 | **98.9%** | 12.498 |
+| head4 g128 | 92.1% | 12.713 |
+| head4 g32 | 92.7% | 12.585 |
+| flash onnx / fused (A / H) | 96.7% | 191.515 † |
+
+† Coverage 86.4% at P=256; *covered* PPL = 5.645. Clustering quality is in line with the
+standard-transformer models — the head method transfers fine; only the runtime harness doesn't.
+
+---
+
 ## Models pending
 
 Each is one `build_all.sh <hf-model> <slug>` then the three commands above. FlashHead's edge should
 grow where the head is a larger share of decode (bigger V:D, fewer layers).
 
-| model | hf id | slug |
-|---|---|---|
-| Qwen3.5-0.8B | `Qwen/Qwen3.5-0.8B` | `qwen3_5_0_8b` |
-| LFM2.5-350M | `LiquidAI/LFM2.5-350M` | `lfm2_5_350m` |
-| h2o-danube3-500m-chat | `h2oai/h2o-danube3-500m-chat` | `danube3_500m` |
+| model | hf id | slug | note |
+|---|---|---|---|
+| LFM2.5-350M | `LiquidAI/LFM2.5-350M` | `lfm2_5_350m` | LiquidAI hybrid (short-conv + attn) — likely quality-only until the decode loop supports hybrid state |
+| h2o-danube3-500m-chat | `h2oai/h2o-danube3-500m-chat` | `danube3_500m` | standard Llama-style transformer — full bench |
 
 (cap must divide V; if `cap=16` doesn't, `build_all` fails at clustering — pick a divisor of that
 model's vocab via the `[cap]` arg. block_size 128 must divide D.)
