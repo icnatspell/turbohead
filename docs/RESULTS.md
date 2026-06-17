@@ -592,6 +592,37 @@ read across models.** Flash coverage 85.0% at P=256; *covered* PPL = 73.5.
 
 ---
 
+## Tuning `P` — the speed↔quality frontier
+
+`P` (probes) is the one knob you change per deploy without rebuilding (just re-splice). It trades
+candidate coverage for stage-2 cost. We swept `P ∈ {64,128,256,384,512}` on the three highest-head-share
+models, greedy @1 thread (cells: **speedup× vs head16 / flash top-1 agreement**; coverage in the note):
+
+| model (V:D, head share) | P=64 | P=128 | P=256 | P=384 | P=512 |
+|---|---|---|---|---|---|
+| Gemma3-270M (410, **highest**) | 6.46× / 87.2% | 6.10× / 91.4% | **5.74× / 94.8%** | 5.90× / 96.4% | 5.21× / 97.3% |
+| Gemma3-1B (228) | 2.98× / 84.0% | 3.12× / 90.5% | **3.05× / 94.7%** | 2.98× / 96.2% | 2.88× / 97.3% |
+| Qwen3.5-0.8B (242) | 2.77× / 86.4% | 2.79× / 93.9% | **2.81× / 97.2%** | 2.77× / 97.9% | 2.67× / 98.3% |
+
+Coverage rises monotonically with `P` across all three (≈73–77% at P=64 → ≈91–93% at P=512). The speed
+column is from a separate 1-thread run, so absolute × differ slightly from the per-model tables
+(run-to-run noise on these fast models) — read the *shape*, not the absolute ×.
+
+**The rule: `P`'s speed cost is proportional to head share; its quality benefit is universal.**
+
+- **Extreme head share (Gemma3-270M):** `P` is a genuine speed↔quality dial — 6.46×@87% (P=64) down to
+  5.21×@97% (P=512), a ~20% speed swing. Pick the knee for your quality bar (~P=128–256).
+- **Merely-high head share (Gemma3-1B, Qwen3.5-0.8B):** speed is **flat in `P`** (±noise) while
+  agreement climbs 84→97% / 86→98% — so **raising `P` to 384–512 is nearly-free accuracy.** The default
+  `P=256` is mildly conservative here; bump it if you want the last 2–3 points.
+- **Low head share (danube3, see its `P`-sensitivity note above):** `P` barely moves step time and
+  lowering it costs coverage fast → keep `P` high.
+
+Reproduce: `bash /tmp/psweep_run.sh` pattern — `turbohead-splice --backend fused -P <P> --dst .../fused_p<P>`
+per `P`, then `turbohead-bench` (speed) + flash agreement/coverage from `eval/{agreement,ppl}` at each `P`.
+
+---
+
 ## Adding a model
 
 The seven-model sweep above is complete. To add another: one `build_all.sh <hf-model> <slug>` then the
@@ -624,6 +655,8 @@ Open items, roughly in priority order:
    model** — LFM2.5 is genuinely ~281; top-1 agreement is the cross-model metric.
 3. **Land the branch.** `turbohead-fused-op` carries the fused kernel, the multi-model sweep, the
    clustering tail fix, and the hybrid decode loop — merge to `main` once reviewed.
-4. **(Optional) coverage/speed Pareto.** A small `(cap, P)` sweep per model to pick the knee instead of
-   the fixed `cap=16, P=256` — most useful for the big-vocab models where `P` actually moves the step
-   time (the danube3 note shows it barely does for small vocab).
+4. **`P` frontier — done; `cap` axis still open.** The `P` sweep on the 3 high-head-share models is
+   in [Tuning `P`](#tuning-p--the-speedquality-frontier) above (key result: for merely-high head share,
+   raising `P` to 384–512 is nearly-free accuracy; only extreme head share has a real tradeoff). The
+   `cap` axis (re-cluster per value; trades stage-1 `K=V/cap` vs stage-2 `P·cap`) is still unexplored —
+   worth a sweep on the 2–3 highest-head-share models if pursuing further.
