@@ -31,6 +31,33 @@ greedy agreement at every thread count; **`head8 g128`** is the dense quality sw
 agreement, fp32-equal PPL) when you need calibrated full-vocab probabilities; flash full-distribution
 PPL is coverage-limited (raise `-P`). Per-model speed×thread×regime tables and reproduce commands below.
 
+## Key findings
+
+1. **Speedup ∝ head share.** The fused win tracks the head's fraction of a decode step — narrow hidden
+   `D` + large vocab `V` + few/light layers ⇒ bigger win. Spans **1.45× (danube3, V:D=20) → 5.37×
+   (Gemma3-270M, V:D=410)** @1t vs an fp32 head; ~1.33× ceiling vs an int8 head (Amdahl).
+
+2. **Fused flash dominates dense quant heads.** At every model and thread count it beats `head{16,8,4}`
+   on *both* speed and greedy agreement. `head8 g128` is the dense quality sweet spot (≈98–99% agree,
+   fp32-equal PPL) only if you need calibrated full-vocab probabilities.
+
+3. **`P`'s speed cost is proportional to head share; its quality benefit is universal.** Raising `P`
+   always lifts agreement/coverage, but only *costs* speed where the head is a large share of the step.
+   So: **extreme head share** (Gemma3-270M) → `P` is a real speed↔quality dial (6.46×@87% … 5.21×@97%),
+   tune to the knee; **merely-high head share** (Gemma3-1B, Qwen3.5-0.8B) → speed is **flat in `P`**, so
+   `P=384–512` is *nearly-free* accuracy (97–98% agree) and the default `P=256` is mildly conservative;
+   **low head share** (danube3) → `P` barely moves speed and lowering it costs coverage, so keep it high.
+   Full frontier in [Tuning `P`](#tuning-p--the-speedquality-frontier).
+
+4. **PPL is within-model only.** Absolute teacher-forced PPL varies by tokenizer/base-model (verified
+   `H·Wᵀ` == the HF model's own logits, so it's real, not a harness artifact; WikiText is detokenized
+   before scoring). Read PPL as a *dense-vs-flash delta within a model*; **top-1 agreement is the
+   cross-model-comparable quality metric.**
+
+5. **The head method is architecture-agnostic.** Standard transformers, hybrid conv/SSM + attention
+   (LFM2.5), and embeddings-split models (Qwen3.5) all splice and decode via the generic decode loop;
+   clustering quality transfers cleanly (94–98% flash agreement everywhere).
+
 ## Reproduce a model from scratch
 
 One command builds every artifact for a model into its own `artifacts/<slug>/` dir (genai int4
