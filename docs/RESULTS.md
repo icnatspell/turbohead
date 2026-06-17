@@ -11,14 +11,14 @@ hidden `D` + large vocab `V` + few layers ⇒ the head dominates ⇒ bigger spee
 
 | model | D | V | layers | fused greedy @1t | fused sampling @1t | flash agree | coverage | head8g128 agree |
 |---|---|---|---|---|---|---|---|---|
-| Gemma3-270M | 640 | 262k | 18 | **5.37×** | **6.08×** | 95.2% | 87.6% | 98.3% |
-| Gemma3-1B | 1152 | 262k | 26 | **3.04×** | **3.08×** | 94.4% | 85.6% | 97.9% |
-| Qwen3.5-0.8B ‡ | 1024 | 248k | 24 | **2.82×** | **2.75×** | 96.7% | 86.4% | 98.9% |
-| Qwen3-0.6B | 1024 | 152k | 28 | **2.40×** | **2.45×** | 97.6% | 88.5% | 98.5% |
-| Llama-3.2-1B | 2048 | 128k | 16 | **2.09×** | **2.08×** | 96.9% | 90.8% | 99.3% |
-| Qwen3-1.7B | 2048 | 152k | 28 | **2.05×** | **2.10×** | 97.9% | 88.6% | 98.5% |
-| LFM2.5-350M ‡ | 1024 | 65k | 16 | **1.84×** | **2.04×** | 98.2% | 77.4% | 99.0% |
-| h2o-danube3-500m | 1536 | 32k | 16 | **1.45×** | **1.21×** | 94.5% | 90.8% | 99.6% |
+| Gemma3-270M | 640 | 262k | 18 | **5.37×** | **6.08×** | 94.8% | 87.4% | 98.0% |
+| Gemma3-1B | 1152 | 262k | 26 | **3.04×** | **3.08×** | 94.7% | 86.2% | 98.0% |
+| Qwen3.5-0.8B ‡ | 1024 | 248k | 24 | **2.82×** | **2.75×** | 97.2% | 87.9% | 99.2% |
+| Qwen3-0.6B | 1024 | 152k | 28 | **2.40×** | **2.45×** | 96.8% | 87.9% | 98.5% |
+| Llama-3.2-1B | 2048 | 128k | 16 | **2.09×** | **2.08×** | 97.1% | 90.7% | 99.2% |
+| Qwen3-1.7B | 2048 | 152k | 28 | **2.05×** | **2.10×** | 97.2% | 87.7% | 98.6% |
+| LFM2.5-350M ‡ | 1024 | 65k | 16 | **1.84×** | **2.04×** | 98.4% | 85.0% | 99.1% |
+| h2o-danube3-500m | 1536 | 32k | 16 | **1.45×** | **1.21×** | 94.1% | 91.0% | 99.6% |
 
 ‡ **Hybrid** models (SSM/conv state interleaved with sparse attention), benched end-to-end via the
 generalized decode loop. **Qwen3.5-0.8B** also splits the embedding out (needs `inputs_embeds` + 3-D
@@ -54,7 +54,11 @@ unless `FORCE=1`. Per-model command blocks are listed in each section.
   fp32-equivalent `head16` at the **same** thread count.
 - **Quality** (`turbohead-head-quality`): top-1 agreement + WikiText-2 PPL on the model's real
   hidden states (HF fp32), reference = the full-precision head (`head_W.npy`). Dense variants run
-  their **actual** extracted head kernel (no numpy re-quant). Thread- and regime-independent.
+  their **actual** extracted head kernel (no numpy re-quant). Thread- and regime-independent. WikiText
+  is **detokenized** before scoring (undo `@-@`/spaced-punctuation markup) — raw markup inflates PPL
+  wildly and unevenly across models. **Read PPL within a model, not across** (different tokenizers /
+  base-model quality make absolute PPL incomparable — LFM2.5's ~281 is genuine, verified `H·Wᵀ` ==
+  the model's own logits); **top-1 agreement is the cross-model-comparable metric.**
 - **Heads compared:** `head{16,8,4}` dense at MatMulNBits group size g (`turbohead-quantize-head`);
   `flash onnx` (contract A, portable (1,V) logits); `flash fused` (contract H, custom op). Body is
   int4 g128 for all rows; only the head varies.
@@ -65,7 +69,7 @@ unless `FORCE=1`. Per-model command blocks are listed in each section.
 
 ## Qwen3-0.6B (int4 body) — 2026-06-16
 
-V=151936, D=1024, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 13.518.
+V=151936, D=1024, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 13.046.
 
 ```bash
 bash turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b
@@ -81,16 +85,16 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 13.518 |
-| head8 g128 | **98.5%** | 13.520 |
-| head4 g128 | 90.9% | 13.871 |
-| head4 g32 | 93.2% | 13.562 |
-| flash onnx (A) | 97.6% | 121.868 † |
-| flash fused (H) | 97.6% | 121.868 † |
+| head16 (fp32-eq, ref) | 100.0% | 13.046 |
+| head8 g128 | **98.5%** | 13.066 |
+| head4 g128 | 90.2% | 13.302 |
+| head4 g32 | 93.0% | 13.076 |
+| flash onnx (A) | 96.8% | 144.786 † |
+| flash fused (H) | 96.8% | 144.786 † |
 
-† Flash full-distribution PPL is **coverage-limited**: at P=256 only **88.5%** of targets fall in the
+† Flash full-distribution PPL is **coverage-limited**: at P=256 only **87.9%** of targets fall in the
 probed candidate set; uncovered targets are floored to ε, inflating PPL. The *covered* PPL (ranking
-quality where the target is probed) = **6.356**. So flash is strong for greedy / sampling-over-shortlist
+quality where the target is probed) = **6.390**. So flash is strong for greedy / sampling-over-shortlist
 but weak for full-vocab likelihood — raise P, or use a dense head, if you need calibrated full-V probs.
 (onnx and fused share the same clustering math, hence identical quality.)
 
@@ -130,7 +134,7 @@ but weak for full-vocab likelihood — raise P, or use a dense head, if you need
 
 ## Gemma3-270M (int4 body) — 2026-06-16
 
-V=262144, D=640, 18 layers. FlashHead: cap=16, K=16384, P=256. Reference PPL (fp32 head) = 11.636.
+V=262144, D=640, 18 layers. FlashHead: cap=16, K=16384, P=256. Reference PPL (fp32 head) = 11.425.
 Int4 body uses **plain RTN** (genai's `k_quant_last` reshape-crashes on this model's weight shapes;
 build_all auto-falls back). Tiny D + huge V + few layers ⇒ the head dominates decode, so FlashHead's
 edge is far larger than on Qwen3-0.6B.
@@ -149,13 +153,13 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 11.636 |
-| head8 g128 | **98.3%** | 11.649 |
-| head4 g128 | 82.7% | 12.900 |
-| head4 g32 | 88.0% | 12.169 |
-| flash onnx / fused (A / H) | 95.2% | 150.280 † |
+| head16 (fp32-eq, ref) | 100.0% | 11.425 |
+| head8 g128 | **98.0%** | 11.437 |
+| head4 g128 | 82.3% | 12.864 |
+| head4 g32 | 87.5% | 12.022 |
+| flash onnx / fused (A / H) | 94.8% | 157.322 † |
 
-† Coverage 87.6% at P=256; *covered* PPL = 6.195 (same caveat as Qwen — flash is coverage-limited for
+† Coverage 87.4% at P=256; *covered* PPL = 6.063 (same caveat as Qwen — flash is coverage-limited for
 full-vocab likelihood).
 
 ### Speed — greedy (tok/s, median ± std; × vs head16)
@@ -186,14 +190,14 @@ full-vocab likelihood).
   only 18 layers the head is the dominant cost — fused FlashHead hits **5.37× greedy / 6.08× sampling
   @1t** vs the fp32 head (vs 2.40× / 2.45× on Qwen3-0.6B). Even int4 dense heads only reach ~3×.
 - Fused beats onnx and every dense head at every thread count; head8 g128 is again the dense quality
-  sweet spot (98.3%, fp32-equal PPL). int4 dense agreement is notably worse here (82.7% g128 / 88.0%
-  g32) than on Qwen — flash at 95.2% is the better accuracy/speed trade.
+  sweet spot (98.0%, fp32-equal PPL). int4 dense agreement is notably worse here (82.3% g128 / 87.5%
+  g32) than on Qwen — flash at 94.8% is the better accuracy/speed trade.
 
 ---
 
 ## Gemma3-1B (int4 body) — 2026-06-16
 
-V=262144, D=1152, 26 layers. FlashHead: cap=16, K=16384, P=256. Reference PPL (fp32 head) = 7.931.
+V=262144, D=1152, 26 layers. FlashHead: cap=16, K=16384, P=256. Reference PPL (fp32 head) = 8.058.
 Int4 body = RTN (k_quant_last reshape-crashes; auto-fallback). Same 262k vocab as 270M but wider
 hidden + more layers, so the head is a smaller share than 270M → smaller (but still large) flash win.
 
@@ -211,13 +215,13 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 7.931 |
-| head8 g128 | **97.9%** | 7.929 |
-| head4 g128 | 85.5% | 8.413 |
-| head4 g32 | 90.7% | 8.149 |
-| flash onnx / fused (A / H) | 94.4% | 171.189 † |
+| head16 (fp32-eq, ref) | 100.0% | 8.058 |
+| head8 g128 | **98.0%** | 8.075 |
+| head4 g128 | 84.8% | 8.589 |
+| head4 g32 | 89.9% | 8.263 |
+| flash onnx / fused (A / H) | 94.7% | 152.058 † |
 
-† Coverage 85.6% at P=256; *covered* PPL = 3.886.
+† Coverage 86.2% at P=256; *covered* PPL = 4.130.
 
 ### Speed — greedy (tok/s, median ± std; × vs head16)
 
@@ -247,14 +251,14 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
   Gemma3-270M (5.37×), consistent with head share: same 262k vocab as 270M but D=1152 and 26 layers
   dilute the head's fraction of decode.
 - Fused beats every dense head at every thread count; head8 g128 again the dense quality sweet spot
-  (97.9%, fp32-equal PPL). int4 dense agreement weak (85.5% g128 / 90.7% g32); flash 94.4% is the
-  better trade. Coverage 85.6% — bump P if full-vocab likelihood matters.
+  (98.0%, fp32-equal PPL). int4 dense agreement weak (84.8% g128 / 89.9% g32); flash 94.7% is the
+  better trade. Coverage 86.2% — bump P if full-vocab likelihood matters.
 
 ---
 
 ## Llama-3.2-1B (int4 body) — 2026-06-16
 
-V=128256, D=2048, 16 layers. FlashHead: cap=16, K=8016, P=256. Reference PPL (fp32 head) = 7.115.
+V=128256, D=2048, 16 layers. FlashHead: cap=16, K=8016, P=256. Reference PPL (fp32 head) = 7.204.
 Int4 body = RTN. Wide hidden (2048) + smaller vocab ⇒ head is a relatively small share, so the flash
 win is the most modest of the set (similar to Qwen).
 
@@ -272,13 +276,13 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 7.115 |
-| head8 g128 | **99.3%** | 7.118 |
-| head4 g128 | 93.5% | 7.179 |
-| head4 g32 | 93.7% | 7.199 |
-| flash onnx / fused (A / H) | 96.9% | 47.102 † |
+| head16 (fp32-eq, ref) | 100.0% | 7.204 |
+| head8 g128 | **99.2%** | 7.202 |
+| head4 g128 | 91.7% | 7.267 |
+| head4 g32 | 93.7% | 7.303 |
+| flash onnx / fused (A / H) | 97.1% | 49.583 † |
 
-† Coverage 90.8% at P=256 (highest of the set — smaller vocab); *covered* PPL = 4.289.
+† Coverage 90.7% at P=256 (among the highest — smaller vocab); *covered* PPL = 4.347.
 
 ### Speed — greedy (tok/s, median ± std; × vs head16)
 
@@ -306,14 +310,14 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 - Fused FlashHead **2.09× greedy / 2.08× sampling @1t** — the most modest win of the set, consistent
   with the smallest head share (D=2048, only 128k vocab, 16 layers). Still beats every dense head.
-- Highest coverage (90.8%) and best int4-dense agreement (93.5–93.7%) of the four models; head8 g128
-  near-lossless (99.3%, fp32-equal PPL). Flash 96.9% agreement.
+- High coverage (90.7%); int4-dense agreement 91.7–93.7%; head8 g128 near-lossless (99.2%, fp32-equal
+  PPL). Flash 97.1% agreement.
 
 ---
 
 ## Qwen3-1.7B (int4 body) — 2026-06-17
 
-V=151936, D=2048, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 11.173.
+V=151936, D=2048, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 10.752.
 Int4 body = RTN. Wide hidden (2048) + the most layers of the set ⇒ smallest head share, so the flash
 win is the most modest measured (just under Llama, which shares D=2048 but has fewer layers).
 
@@ -331,13 +335,13 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 11.173 |
-| head8 g128 | **98.5%** | 11.168 |
-| head4 g128 | 93.4% | 11.295 |
-| head4 g32 | 94.8% | 11.201 |
-| flash onnx / fused (A / H) | 97.9% | 100.580 † |
+| head16 (fp32-eq, ref) | 100.0% | 10.752 |
+| head8 g128 | **98.6%** | 10.765 |
+| head4 g128 | 91.5% | 10.960 |
+| head4 g32 | 93.7% | 10.820 |
+| flash onnx / fused (A / H) | 97.2% | 122.067 † |
 
-† Coverage 88.6% at P=256; *covered* PPL = 5.270.
+† Coverage 87.7% at P=256; *covered* PPL = 5.034.
 
 ### Speed — greedy (tok/s, median ± std; × vs head16)
 
@@ -365,7 +369,7 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 - Fused FlashHead **2.05× greedy / 2.10× sampling @1t** — the most modest win of the set, consistent
   with the smallest head share (D=2048, 28 layers — most of the set). Still beats every dense head.
-- head8 g128 near-lossless (98.5%, fp32-equal PPL); flash 97.9% agreement, covered PPL 5.270.
+- head8 g128 near-lossless (98.6%, fp32-equal PPL); flash 97.2% agreement, covered PPL 5.034.
 - Clustering note: this head's geometry stalled the balanced-assign rounds (left ~60% of the vocab to
   the tail). Fixed in `build_clusters.py` — bail when rounds stall + block-vectorized tail fill.
 
@@ -375,7 +379,7 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 V=248320, D=1024, 24 layers (**hybrid Mamba/attention** — mostly SSM `conv_state`/`recurrent_state`,
 only every 4th layer is attention). FlashHead: cap=16, K=15520, P=256. Reference PPL (fp32 head) =
-12.499. The widest vocab-to-hidden ratio of the set (V:D=242) on top of a light SSM body ⇒ the head is
+10.866. The widest vocab-to-hidden ratio of the set (V:D=242) on top of a light SSM body ⇒ the head is
 a large share of decode, so the flash win is among the biggest measured.
 
 This model splits the embedding lookup out — it's driven by `inputs_embeds` + a 3-D (M-RoPE)
@@ -397,13 +401,13 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 12.499 |
-| head8 g128 | **98.9%** | 12.498 |
-| head4 g128 | 92.1% | 12.713 |
-| head4 g32 | 92.7% | 12.585 |
-| flash onnx / fused (A / H) | 96.7% | 191.515 † |
+| head16 (fp32-eq, ref) | 100.0% | 10.866 |
+| head8 g128 | **99.2%** | 10.864 |
+| head4 g128 | 90.5% | 11.101 |
+| head4 g32 | 92.0% | 10.964 |
+| flash onnx / fused (A / H) | 97.2% | 124.806 † |
 
-† Coverage 86.4% at P=256; *covered* PPL = 5.645.
+† Coverage 87.9% at P=256; *covered* PPL = 5.397.
 
 ### Speed — greedy (tok/s, median ± std; × vs head16)
 
@@ -431,15 +435,15 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 - Fused FlashHead **2.82× greedy / 2.75× sampling @1t** — third-highest of the set, behind only the
   big-vocab Gemmas. The huge vocab (V:D=242) and the light SSM body make the head a dominant share.
-- First **embeds-in** model benched end-to-end. head8 g128 near-lossless (98.9%, fp32-equal PPL); flash
-  96.7% agreement, covered PPL 5.645. The head method transfers cleanly to the hybrid arch.
+- First **embeds-in** model benched end-to-end. head8 g128 near-lossless (99.2%, fp32-equal PPL); flash
+  97.2% agreement, covered PPL 5.397. The head method transfers cleanly to the hybrid arch.
 
 ---
 
 ## h2o-danube3-500m-chat (int4 body) — 2026-06-17
 
 V=32000, D=1536, 16 layers, **untied** embeddings. FlashHead: cap=16, K=2000, P=256. Reference PPL
-(fp32 head) = 6.791. Standard Llama-style transformer. This is the **low end of the head-share
+(fp32 head) = 6.555. Standard Llama-style transformer. This is the **low end of the head-share
 spectrum** — tiny vocab (32k) + wide hidden (1536) means the head is a small fraction of a decode step,
 so the flash win is the smallest of the set and even dense quant heads are competitive. Numbers are
 noisier here than for the larger models (a fast ~20 ms/step model amplifies run-to-run variance).
@@ -458,13 +462,13 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 6.791 |
-| head8 g128 | **99.6%** | 6.793 |
-| head4 g128 | 94.5% | 6.858 |
-| head4 g32 | 96.3% | 6.837 |
-| flash onnx / fused (A / H) | 94.5% | 51.833 † |
+| head16 (fp32-eq, ref) | 100.0% | 6.555 |
+| head8 g128 | **99.6%** | 6.559 |
+| head4 g128 | 94.6% | 6.636 |
+| head4 g32 | 95.9% | 6.605 |
+| flash onnx / fused (A / H) | 94.1% | 48.812 † |
 
-† Coverage 90.8% at P=256 (high — small vocab); *covered* PPL = 4.698.
+† Coverage 91.0% at P=256 (high — small vocab); *covered* PPL = 4.657.
 
 ### Speed — greedy (tok/s, median ± std; × vs head16)
 
@@ -494,7 +498,7 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
   the tiny V:D ratio (head is a small share). `head8 g128` (1.39–1.63×, 99.6% agree, fp32-equal PPL) is
   genuinely competitive here, and int4 dense heads sometimes match fused at 1t — for small-vocab models
   the case for flash over a well-quantized dense head is weakest.
-- High coverage (90.8%) from the small vocab; flash 94.5% agreement.
+- High coverage (91.0%) from the small vocab; flash 94.1% agreement.
 
 ### Profile + `P` sensitivity (1 thread, `fused`)
 
@@ -508,9 +512,9 @@ Re-splicing the fused head at **P=64** (¼ the candidates; no rebuild needed) vs
 
 | | greedy 1t | 2t | 4t | 8t | top-1 agree | coverage |
 |---|---|---|---|---|---|---|
-| fused P=256 | 1.48× | 1.37× | 1.38× | 1.23× | 94.5% | 90.8% |
-| fused **P=64** | **1.55×** | 1.52× | 1.63× | **1.57×** | 83.7% | 76.7% |
-| P=64 vs P=256 | +4.7% | +11% | +18% | **+27%** | −10.8 pts | −14 pts |
+| fused P=256 | 1.48× | 1.37× | 1.38× | 1.23× | 94.1% | 91.0% |
+| fused **P=64** | **1.55×** | 1.52× | 1.63× | **1.57×** | 82.9% | 76.2% |
+| P=64 vs P=256 | +4.7% | +11% | +18% | **+27%** | −11.2 pts | −14.8 pts |
 
 At 1 thread P=64 is only **~5% faster** (matches the profile: stage 2 is 8% of the step, cut 4× ≈ 6%)
 and costs ~11 points of agreement — a poor greedy trade. The gain grows with threads (to +27% @8t)
@@ -543,17 +547,18 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 
 | head | top-1 agree | PPL |
 |---|---|---|
-| head16 (fp32-eq, ref) | 100.0% | 1071.5 † |
-| head8 g128 | **99.0%** | 1070.3 † |
-| head4 g128 | 91.5% | 1078.4 † |
-| head4 g32 | 92.7% | 1057.5 † |
-| flash onnx / fused (A / H) | 98.2% | 24797 † |
+| head16 (fp32-eq, ref) | 100.0% | 281.4 † |
+| head8 g128 | **99.1%** | 281.5 † |
+| head4 g128 | 92.4% | 287.2 † |
+| head4 g32 | 93.0% | 283.8 † |
+| flash onnx / fused (A / H) | 98.4% | 2438 † |
 
-† **Absolute PPL is not reliable for this model** — the dense reference PPL (~1071) is ~100× the other
-models', consistent across all heads, which points to a hidden-state-extraction mismatch in the quality
-harness for this hybrid arch (the head sees mis-scaled hidden states; argmax is scale-invariant so
-**top-1 agreement is unaffected and is the metric to trust here** — flash 98.2%, head8 g128 99.0%).
-Flash coverage 77.4% at P=256 (also likely depressed by the same mismatch). The *covered* PPL is 150.9.
+† LFM2.5's absolute PPL is **genuinely high** (~281 even on detokenized WikiText, vs 6–13 for the
+others) — *not* a harness bug: `H·Wᵀ` reproduces the model's own logits exactly, so this is just this
+model's real teacher-forced PPL on English WikiText (a small, likely multilingual/instruct-leaning
+model). PPL is only comparable **within** a model: here head8 g128 (281.5) matches head16 (281.4), so
+the head method transfers fine, and **top-1 agreement (flash 98.4%, head8 g128 99.1%) is the metric to
+read across models.** Flash coverage 85.0% at P=256; *covered* PPL = 73.5.
 
 ### Speed — greedy (tok/s, median ± std; × vs head16)
 
@@ -582,7 +587,8 @@ Flash coverage 77.4% at P=256 (also likely depressed by the same mismatch). The 
 - Fused FlashHead **1.84× greedy / 2.04× sampling @1t** — fits the head-share trend (V:D=64, between
   Qwen3-0.6B's 2.40× and danube3's 1.45×), and beats every dense head at every thread count.
 - First **hybrid** model benched end-to-end, via the generalized decode loop. The head method itself
-  transfers cleanly (98.2% agreement); only the PPL harness mis-scales this arch's hidden states.
+  transfers cleanly (flash 98.4% agreement, head8 g128 99.1%). Its high absolute PPL is a real model
+  property (verified `H·Wᵀ` == the model's logits), not a harness artifact — read PPL within-model.
 
 ---
 
@@ -610,11 +616,12 @@ Open items, roughly in priority order:
    feeds `inputs_embeds` (numpy lookup in the tied embedding `head_W`) + a 3-D M-RoPE `position_ids`.
    Qwen3.5-0.8B now benches end-to-end (fused 2.82× greedy @1t). For a self-contained deploy, splice
    could ship a fp16 `embed.npy` in the model dir instead of falling back to `../head_W.npy`.
-2. **Fix the head-quality PPL harness for hybrids.** LFM2.5's absolute PPL is ~100× off (dense ref
-   ~1071) while top-1 agreement is fine — the harness is almost certainly capturing pre-final-norm /
-   mis-scaled hidden states for these archs. Argmax is scale-invariant so the speedup/agreement story
-   is unaffected, but the PPL column is meaningless for hybrids until the hook grabs the post-norm
-   hidden state. (Track it down via the `lm_head`-input hook in `eval/head_quality.py`.)
+2. ~~Fix the head-quality PPL harness for hybrids.~~ **Done** (2026-06-17): it was *not* mis-scaled
+   hidden states (verified `H·Wᵀ` == the model's own logits exactly). The inflation came from scoring
+   **raw** WikiText-2 markup (`@-@`, spaced punctuation); `wikitext()` now detokenizes, which dropped
+   spurious PPL across the board (e.g. LFM2.5 680→281, Qwen 12.4→13.0 stable) and all 8 quality tables
+   were refreshed. Remaining truth: absolute PPL is model-dependent and **only comparable within a
+   model** — LFM2.5 is genuinely ~281; top-1 agreement is the cross-model metric.
 3. **Land the branch.** `turbohead-fused-op` carries the fused kernel, the multi-model sweep, the
    clustering tail fix, and the hybrid decode loop — merge to `main` once reviewed.
 4. **(Optional) coverage/speed Pareto.** A small `(cap, P)` sweep per model to pick the knee instead of

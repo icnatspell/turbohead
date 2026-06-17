@@ -184,9 +184,9 @@ speedup:
 
 | model | D / V / layers | fused greedy @1t | fused sampling @1t | flash top-1 agree |
 |---|---|---|---|---|
-| Gemma3-270M | 640 / 262k / 18 | **5.37×** | **6.08×** | 95.2% |
-| Qwen3-0.6B | 1024 / 152k / 28 | **2.40×** | **2.45×** | 97.6% |
-| Qwen3-1.7B | 2048 / 152k / 28 | **2.05×** | **2.10×** | 97.9% |
+| Gemma3-270M | 640 / 262k / 18 | **5.37×** | **6.08×** | 94.8% |
+| Qwen3-0.6B | 1024 / 152k / 28 | **2.40×** | **2.45×** | 96.8% |
+| Qwen3-1.7B | 2048 / 152k / 28 | **2.05×** | **2.10×** | 97.2% |
 
 Speedup is vs `head16` (an fp32 dense head on the same int4 body) at the same thread count; fused flash
 also beats every *quantized* dense head (incl. int4) on both speed and agreement. Full tables — all
@@ -219,13 +219,13 @@ itself slower.
 
 | metric | value | meaning |
 |---|---|---|
-| **Top-1 agreement** (P=256) | **97.6%** | greedy next-token matches the dense head |
+| **Top-1 agreement** (P=256) | **96.8%** | greedy next-token matches the dense head |
 | Standalone subgraph argmax | **100%** | int4 stage-1 preserves argmax vs the fp16 reference |
-| Candidate coverage (P=256) | 88.5% | true token sits inside the probed set; rises with P |
-| Dense / covered / full-dist flash PPL | 13.5 / 6.4 / 121.9 | full-distribution PPL tracks coverage |
+| Candidate coverage (P=256) | 87.9% | true token sits inside the probed set; rises with P |
+| Dense / covered / full-dist flash PPL | 13.0 / 6.4 / 144.8 | full-distribution PPL tracks coverage |
 
-Greedy decoding — what most deploys use — holds 97.6% agreement with no measurable quality loss on
-deterministic prompts. Coverage explains the full-distribution PPL gap: ~11% of targets fall outside
+Greedy decoding — what most deploys use — holds 96.8% agreement with no measurable quality loss on
+deterministic prompts. Coverage explains the full-distribution PPL gap: ~12% of targets fall outside
 the P=256 candidate set and get ≈0 probability (the *covered* PPL, where the target is in the set, is
 6.4). Raising `P` trades speed for coverage; we run `P=256` on CPU.
 

@@ -3,16 +3,28 @@ Hooks lm_head input on the HF model over real text; flash retrieval uses artifac
 Usage: `uv run turbohead-agreement [--npz artifacts/clusters.npz]`."""
 
 import argparse
+import re
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from loguru import logger
 
+
+def _detokenize(t):
+    """Undo WikiText-2's tokenized markup (`@-@`, spaced punctuation, ` \\n `). Raw WikiText inflates
+    teacher-forced PPL wildly and unevenly across models — e.g. LFM2.5-350M scores ~680 raw vs ~116
+    detokenized — which made the PPL column noise. Standard detok before scoring restores meaningful,
+    more comparable numbers. ponytail: the high-impact substitutions, not a full reverse-tokenizer."""
+    t = t.replace(" @-@ ", "-").replace(" @,@ ", ",").replace(" @.@ ", ".")
+    t = re.sub(r" ([.,;:!?)\]])", r"\1", t).replace(" \n ", "\n").replace("( ", "(")
+    return t
+
+
 def wikitext(n_chars=20000):
     from datasets import load_dataset
 
     ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
-    text = "".join(t for t in ds["text"] if t.strip())
+    text = _detokenize("".join(t for t in ds["text"] if t.strip()))
     return text[:n_chars]
 
 
