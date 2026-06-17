@@ -176,10 +176,10 @@ this ~2 ms head isn't where the cores are needed.
 
 ## Results
 
-Across five models on the CPU EP, fused TurboHead decodes **2.05×–5.37× faster than an fp32-equivalent
-dense head** at one thread, while matching its greedy next-token choice 95–98% of the time. The win
-scales with the head's share of a decode step — narrow hidden `D`, large vocab `V`, few layers ⇒ the
-head dominates ⇒ bigger speedup:
+Across seven models on the CPU EP (incl. a hybrid conv/attention LFM2.5), fused TurboHead decodes
+**1.45×–5.37× faster than an fp32-equivalent dense head** at one thread, while matching its greedy
+next-token choice 94–98% of the time. The win scales with the head's share of a decode step — narrow
+hidden `D`, large vocab `V`, few layers ⇒ the head dominates ⇒ bigger speedup:
 
 | model | D / V / layers | fused greedy @1t | fused sampling @1t | flash top-1 agree |
 |---|---|---|---|---|

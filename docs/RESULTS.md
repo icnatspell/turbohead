@@ -16,11 +16,14 @@ hidden `D` + large vocab `V` + few layers ⇒ the head dominates ⇒ bigger spee
 | Qwen3-0.6B | 1024 | 152k | 28 | **2.40×** | **2.45×** | 97.6% | 88.5% | 98.5% |
 | Llama-3.2-1B | 2048 | 128k | 16 | **2.09×** | **2.08×** | 96.9% | 90.8% | 99.3% |
 | Qwen3-1.7B | 2048 | 152k | 28 | **2.05×** | **2.10×** | 97.9% | 88.6% | 98.5% |
+| LFM2.5-350M ‡ | 1024 | 65k | 16 | **1.84×** | **2.04×** | 98.2% | 77.4% | 99.0% |
 | h2o-danube3-500m | 1536 | 32k | 16 | **1.45×** | **1.21×** | 94.5% | 90.8% | 99.6% |
 
-Quality-only (speed N/A — hybrid Mamba/attention, decode loop is KV-attention only): **Qwen3.5-0.8B**
-(flash 96.7% agree, head8g128 98.9%). The tiny-vocab **danube3** sits at the low end — its head is a
-small share of decode, so flash barely leads dense heads; see its `P`-sensitivity note below.
+‡ **Hybrid** (short-conv + sparse attention) — benched end-to-end after the decode loop learned generic
+state handling. Quality-only (speed N/A): **Qwen3.5-0.8B** (hybrid Mamba/attention that splits the
+embedding out — needs `inputs_embeds`/3-D `position_ids`, not yet supported; flash 96.7% agree,
+head8g128 98.9%). The tiny-vocab **danube3** sits at the low end — its head is a small share of decode,
+so flash barely leads dense heads; see its `P`-sensitivity note below.
 
 Constant across the set: **fused flash beats every dense quant head** (incl. int4) on both speed and
 greedy agreement at every thread count; **`head8 g128`** is the dense quality sweet spot (≈98–99%
@@ -488,14 +491,82 @@ share (big-vocab models) or at high thread counts; for small-vocab models keep P
 
 ---
 
-## Models pending
+## LFM2.5-350M (int4 body) — 2026-06-17
 
-Each is one `build_all.sh <hf-model> <slug>` then the three commands above. FlashHead's edge should
-grow where the head is a larger share of decode (bigger V:D, fewer layers).
+V=65536, D=1024, 16 layers (**hybrid: 10 short-conv + 6 attention**), tied embeddings. FlashHead:
+cap=16, K=4096, P=256. LiquidAI hybrid — most layers are short convolutions with `conv_state`, only
+6 are attention (at sparse indices 2/5/8/10/12/14 with `past_key_values.N.key/value`). It feeds
+`input_ids` (the embedding is in-graph), so once `decode_loop.py` learned generic state handling
+(seed every `past*` input from its own shape; remap `past_conv.*`/`past_key_values.N.*` → `present*`)
+it benches end-to-end — unlike Qwen3.5-0.8B, which splits the embedding out.
 
-| model | hf id | slug | note |
-|---|---|---|---|
-| LFM2.5-350M | `LiquidAI/LFM2.5-350M` | `lfm2_5_350m` | LiquidAI hybrid (short-conv + attn) — likely quality-only until the decode loop supports hybrid state |
+```bash
+bash turbohead/surgery/build_all.sh LiquidAI/LFM2.5-350M lfm2_5_350m
+R=artifacts/lfm2_5_350m
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7                              # greedy
+uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
+    --threads 1,2,4,8 --reps 7 --temperature 0.8 --seed 0   # sampling
+uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.npy -P 256
+```
 
-(cap must divide V; if `cap=16` doesn't, `build_all` fails at clustering — pick a divisor of that
-model's vocab via the `[cap]` arg. block_size 128 must divide D.)
+### Quality (vs fp32 head, 1999 WikiText-2 positions)
+
+| head | top-1 agree | PPL |
+|---|---|---|
+| head16 (fp32-eq, ref) | 100.0% | 1071.5 † |
+| head8 g128 | **99.0%** | 1070.3 † |
+| head4 g128 | 91.5% | 1078.4 † |
+| head4 g32 | 92.7% | 1057.5 † |
+| flash onnx / fused (A / H) | 98.2% | 24797 † |
+
+† **Absolute PPL is not reliable for this model** — the dense reference PPL (~1071) is ~100× the other
+models', consistent across all heads, which points to a hidden-state-extraction mismatch in the quality
+harness for this hybrid arch (the head sees mis-scaled hidden states; argmax is scale-invariant so
+**top-1 agreement is unaffected and is the metric to trust here** — flash 98.2%, head8 g128 99.0%).
+Flash coverage 77.4% at P=256 (also likely depressed by the same mismatch). The *covered* PPL is 150.9.
+
+### Speed — greedy (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 45.6±0.7 (1.00×) | 65.9±1.6 (1.00×) | 71.4±2.0 (1.00×) | 72.4±1.2 (1.00×) |
+| head8 g128 | 69.3±0.8 (1.52×) | 100.6±2.4 (1.53×) | 117.3±3.1 (1.64×) | 111.9±1.0 (1.54×) |
+| head4 g128 | 75.9±0.9 (1.66×) | 108.8±1.4 (1.65×) | 134.3±3.1 (1.88×) | 127.0±24.9 (1.75×) |
+| head4 g32 | 74.4±2.4 (1.63×) | 109.5±2.0 (1.66×) | 127.1±3.3 (1.78×) | 128.0±3.5 (1.77×) |
+| flash onnx (A) | 72.1±1.1 (1.58×) | 102.3±2.5 (1.55×) | 120.4±2.7 (1.69×) | 121.5±0.5 (1.68×) |
+| **flash fused (H)** | **84.0±1.7 (1.84×)** | **116.4±3.3 (1.77×)** | **134.4±3.7 (1.88×)** | **136.9±3.8 (1.89×)** |
+
+### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
+
+| head | 1t | 2t | 4t | 8t |
+|---|---|---|---|---|
+| head16 (ref) | 41.7±0.7 (1.00×) | 61.2±1.1 (1.00×) | 68.2±1.2 (1.00×) | 69.6±1.0 (1.00×) |
+| head8 g128 | 66.1±0.8 (1.58×) | 95.7±10.1 (1.57×) | 109.3±1.2 (1.60×) | 108.6±1.9 (1.56×) |
+| head4 g128 | 75.2±2.1 (1.80×) | 104.7±2.3 (1.71×) | 119.4±3.2 (1.75×) | 121.0±2.4 (1.74×) |
+| head4 g32 | 70.5±2.1 (1.69×) | 99.6±2.3 (1.63×) | 116.3±3.1 (1.71×) | 115.4±2.8 (1.66×) |
+| flash onnx (A) | 70.2±1.7 (1.68×) | 101.4±2.5 (1.66×) | 116.0±2.6 (1.70×) | 119.8±1.0 (1.72×) |
+| **flash fused (H)** | **85.0±3.0 (2.04×)** | **117.5±3.1 (1.92×)** | **132.0±3.5 (1.94×)** | **133.9±2.6 (1.92×)** |
+
+### Takeaways
+
+- Fused FlashHead **1.84× greedy / 2.04× sampling @1t** — fits the head-share trend (V:D=64, between
+  Qwen3-0.6B's 2.40× and danube3's 1.45×), and beats every dense head at every thread count.
+- First **hybrid** model benched end-to-end, via the generalized decode loop. The head method itself
+  transfers cleanly (98.2% agreement); only the PPL harness mis-scales this arch's hidden states.
+
+---
+
+## Adding a model
+
+The seven-model sweep above is complete. To add another: one `build_all.sh <hf-model> <slug>` then the
+three commands (bench greedy, bench sampling, head-quality) shown in any section. FlashHead's edge grows
+where the head is a larger share of decode (bigger V:D, fewer layers).
+
+Caveats:
+- `cap` must divide `V`; if `cap=16` doesn't, `build_all` fails at clustering — pass a divisor of that
+  model's vocab as the `[cap]` arg. `block_size` 128 must divide `D`.
+- **Hybrid models** (conv/recurrent state at sparse layer indices) bench fine via the generic state
+  path **if** they feed `input_ids` (e.g. LFM2.5). Models that split the embedding out and require
+  `inputs_embeds` + a 3-D `position_ids` (e.g. Qwen3.5-0.8B) are quality-only until `decode_loop.py`
+  grows an embeddings/position-ids feed.

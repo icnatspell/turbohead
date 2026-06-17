@@ -66,6 +66,7 @@ class Decoder:
         self.sess = ort.InferenceSession(f"{self.dir}/model.onnx", so,
                                          providers=["CPUExecutionProvider"])
         self.out_names = [o.name for o in self.sess.get_outputs()]
+        self.in_names = {i.name for i in self.sess.get_inputs()}
 
         # Tokenizer + EOS ship with the model (splice copies them) — no hardcoded identity.
         self.tok = AutoTokenizer.from_pretrained(self.dir)
@@ -73,16 +74,35 @@ class Decoder:
             "eos_token_id", self.tok.eos_token_id)
         self.eos = set(eos) if isinstance(eos, list) else {eos}
 
-        # KV cache geometry from the past_key_values.*.key inputs.
-        keys = [i for i in self.sess.get_inputs() if i.name.startswith("past_key_values.")]
-        self.n_layers = sum(1 for k in keys if k.name.endswith(".key"))
-        kshape = next(i.shape for i in self.sess.get_inputs()
-                      if i.name == "past_key_values.0.key")
-        self.kv_heads, self.head_size = int(kshape[1]), int(kshape[3])
-        self.kv_names = [f"past_key_values.{i}.{kv}"
-                         for i in range(self.n_layers) for kv in ("key", "value")]
-        self.present_names = [f"present.{i}.{kv}"
-                              for i in range(self.n_layers) for kv in ("key", "value")]
+        # State inputs: KV cache and/or SSM conv/recurrent state. Discovered generically by name
+        # so hybrid models work — attention layers interleaved with conv/recurrent layers, at
+        # sparse indices (e.g. LFM2, Qwen3.5), not just uniform-KV transformers. Each `past*` input
+        # is fed back each step from the matching `present*` output (same suffix), seeded with zeros
+        # of its OWN declared shape: KV's seq dim is symbolic -> 0 (grows), recurrent/conv state is
+        # all-concrete -> full size (updated in place). One path handles both.
+        state = [i for i in self.sess.get_inputs() if i.name.startswith("past")]
+        self.state_seed = {i.name: self._zero_state(i) for i in state}
+        # present output for each past input: past_key_values.2.key -> present.2.key,
+        # past_conv.0 -> present_conv.0 (strip the `past[_key_values]` prefix, prepend `present`).
+        def present_of(n):
+            pre = "past_key_values" if n.startswith("past_key_values") else "past"
+            return "present" + n[len(pre):]
+        self.present_for = {i.name: present_of(i.name) for i in state}
+        missing = [p for p in self.present_for.values() if p not in self.out_names]
+        assert state and not missing, f"no present output for {missing}"
+        # geometry (profile log only): attention layers carry `.key`; SSM layers don't.
+        keys = [i for i in state if i.name.endswith(".key")]
+        self.n_layers = len(keys)
+        self.kv_heads, self.head_size = (int(keys[0].shape[1]), int(keys[0].shape[3])) if keys else (0, 0)
+
+        # Token feed: standard + input_ids-based hybrids feed input_ids; some hybrids (Qwen3.5)
+        # split the embedding out and want inputs_embeds + a 3-D position_ids, which we don't run.
+        extra = self.in_names - {"input_ids", "attention_mask"} - set(self.state_seed)
+        if "input_ids" not in self.in_names or extra:
+            raise NotImplementedError(
+                f"{self.dir}: graph needs {sorted(extra) or ['inputs_embeds']} beyond "
+                "input_ids+attention_mask+state — embeds/position_ids feeds unsupported "
+                "(works for input_ids-based hybrids like LFM2; Qwen3.5 splits the embedding out)")
 
         # Contract: A emits full `logits` (1,V); H emits the candidate shortlist
         # (cand_logits, cand_ids) from the fused op; B emits the token id directly.
@@ -94,15 +114,22 @@ class Decoder:
                           else None if self.contract == "H"
                           else next(n for n in self.out_names if not n.startswith("present.")))
 
+    @staticmethod
+    def _zero_state(inp):
+        """Zero seed for a state input from its declared shape: dim 0 (batch) -> 1, any other
+        symbolic dim -> 0 (KV seq dim, grows); concrete dims kept (recurrent/conv state, full size)."""
+        dt = {"tensor(float)": np.float32, "tensor(float16)": np.float16}.get(inp.type, np.float32)
+        shape = [d if isinstance(d, int) else (1 if i == 0 else 0) for i, d in enumerate(inp.shape)]
+        return np.zeros(shape, dt)
+
     def _empty_past(self):
-        z = np.zeros((1, self.kv_heads, 0, self.head_size), np.float32)
-        return dict.fromkeys(self.kv_names, z)
+        return dict(self.state_seed)
 
     def _step(self, input_ids, attn, past):
         od = dict(zip(self.out_names,
                       self.sess.run(None, {"input_ids": input_ids,
                                            "attention_mask": attn, **past})))
-        past = {p: od[pr] for p, pr in zip(self.kv_names, self.present_names)}
+        past = {name: od[pres] for name, pres in self.present_for.items()}
         return past, od
 
     @staticmethod

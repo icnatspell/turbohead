@@ -1,17 +1,43 @@
 """Integration: run the real spliced model end-to-end. Skipped if the artifact isn't built
 (e.g. in CI) — build it via the README surgery steps to exercise this."""
 import os
+import numpy as np
 import pytest
 from turbohead.inference.decode_loop import Decoder
 
-MODEL = "artifacts/qwen3_0_6b_int4_cpu_onnx"    # contract-A (onnx backend)
-FUSED = "artifacts/qwen3_0_6b_int4_cpu_fused"   # contract-H (fused custom op)
-pytestmark = pytest.mark.skipif(not os.path.isdir(MODEL),
-                                reason=f"{MODEL} not built (run the surgery pipeline)")
+MODEL = "artifacts/qwen3_0_6b/onnx"    # contract-A (onnx backend)
+FUSED = "artifacts/qwen3_0_6b/fused"   # contract-H (fused custom op)
+HYBRID = "artifacts/lfm2_5_350m/fused"  # hybrid (conv + sparse-index attention) — generic state path
+
+
+def test_zero_state_seeds_kv_and_recurrent_shapes():
+    """The generic state seed: batch dim -> 1, symbolic seq dim -> 0 (KV grows), concrete dims
+    kept (recurrent/conv state seeds full-size). Dtype follows the input. No model needed."""
+    class Inp:  # minimal stand-in for an ORT input descriptor
+        def __init__(self, type, shape):
+            self.type, self.shape = type, shape
+
+    kv = Decoder._zero_state(Inp("tensor(float)", ["batch", 8, "past_seq", 96]))
+    assert kv.shape == (1, 8, 0, 96) and kv.dtype == np.float32
+    rec = Decoder._zero_state(Inp("tensor(float)", ["batch", 16, 128, 128]))
+    assert rec.shape == (1, 16, 128, 128)
+    conv = Decoder._zero_state(Inp("tensor(float16)", ["batch", 6144, 3]))
+    assert conv.shape == (1, 6144, 3) and conv.dtype == np.float16
+
+
+@pytest.mark.skipif(not os.path.isdir(HYBRID), reason=f"{HYBRID} not built")
+def test_hybrid_model_decodes():
+    """Hybrid model (interleaved conv + sparse-index attention layers) decodes via the generic
+    state path — regression guard for the past_conv.* / past_key_values.N.* seeding + remap."""
+    dec = Decoder(HYBRID, threads=1)
+    out, tps = dec.generate(dec.tok("Once upon a time,")["input_ids"], max_new=8)
+    assert out and tps > 0
 
 
 @pytest.fixture(scope="module")
 def dec():
+    if not os.path.isdir(MODEL):
+        pytest.skip(f"{MODEL} not built (run the surgery pipeline)")
     return Decoder(MODEL, threads=1)
 
 
