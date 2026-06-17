@@ -570,3 +570,24 @@ Caveats:
   path **if** they feed `input_ids` (e.g. LFM2.5). Models that split the embedding out and require
   `inputs_embeds` + a 3-D `position_ids` (e.g. Qwen3.5-0.8B) are quality-only until `decode_loop.py`
   grows an embeddings/position-ids feed.
+
+---
+
+## What's next
+
+Open items, roughly in priority order:
+
+1. **Embeds-in decode path → unlock Qwen3.5-0.8B speed.** Teach `decode_loop.py` to feed `inputs_embeds`
+   (look the token up in the tied embedding = `head_W`, for tied models) and a 3-D `position_ids`
+   (M-RoPE layout `[3, batch, seq]`). That's the only thing blocking a full speed row for the one
+   remaining quality-only model; the splice + state handling already work for it.
+2. **Fix the head-quality PPL harness for hybrids.** LFM2.5's absolute PPL is ~100× off (dense ref
+   ~1071) while top-1 agreement is fine — the harness is almost certainly capturing pre-final-norm /
+   mis-scaled hidden states for these archs. Argmax is scale-invariant so the speedup/agreement story
+   is unaffected, but the PPL column is meaningless for hybrids until the hook grabs the post-norm
+   hidden state. (Track it down via the `lm_head`-input hook in `eval/head_quality.py`.)
+3. **Land the branch.** `turbohead-fused-op` carries the fused kernel, the multi-model sweep, the
+   clustering tail fix, and the hybrid decode loop — merge to `main` once reviewed.
+4. **(Optional) coverage/speed Pareto.** A small `(cap, P)` sweep per model to pick the knee instead of
+   the fixed `cap=16, P=256` — most useful for the big-vocab models where `P` actually moves the step
+   time (the danube3 note shows it barely does for small vocab).
