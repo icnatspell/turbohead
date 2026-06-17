@@ -1,4 +1,4 @@
-"""Dump the bf16 LM-head weight (tied = embed_tokens.weight) to artifacts/head_W.npy for clustering (§6.2).
+"""Dump the bf16 LM-head weight (tied = embed_tokens.weight) to artifacts/head_W.npy for clustering.
 Prefer the HF checkpoint over the quantized graph: no dequant error. Usage: `uv run turbohead-extract-head`."""
 
 import argparse

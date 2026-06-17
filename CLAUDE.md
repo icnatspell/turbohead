@@ -11,8 +11,8 @@ model**, so any `onnxruntime` CPU deploy gets the speedup. CPU EP, int4 body. Tw
 Swept across **8 models** (Qwen3, Gemma3, Llama-3.2, LFM2.5, h2o-danube3, incl. hybrid conv/SSM +
 attention archs): fused decodes **1.45×–5.37× faster than an fp32-equivalent dense head** @1t, scaling
 with the head's share of a decode step. Reference config: `Qwen/Qwen3-0.6B`. README.md has the method
-writeup; **`docs/RESULTS.md` has all numbers + per-model reproduce commands**; `docs/NEXT_STEPS.md` is
-current state + open items; `docs/PLAN.md` is the design spec (sections like §6 referenced in code).
+writeup + repo map; **`docs/RESULTS.md` has all numbers, key findings, reproduce commands, and open
+items**; `docs/ORT_QUIRKS.md` records the measured ORT CPU quirks behind the precision/op choices.
 
 ## Commands
 
@@ -104,4 +104,5 @@ full-vocab softmax the dense head pays — so sampling speeds up more than greed
   load validates instead. The dense head node is removed but its weight initializer stays (tied embed).
 - IOBinding zero-copy KV is a net loss under contract A (must pull `logits` to numpy anyway; reusing
   ORT output buffers as next-step inputs segfaults). See the `Decoder` docstring.
-- Code comments mark deliberate simplifications with `ponytail:` and reference `docs/PLAN.md` sections (§N).
+- Code comments mark deliberate simplifications with `ponytail:`; non-obvious ORT op/precision choices
+  point to `docs/ORT_QUIRKS.md` for the measured rationale.

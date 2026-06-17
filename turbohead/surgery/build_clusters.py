@@ -1,4 +1,4 @@
-"""Phase 1 — balanced k-means on head rows -> Cnorm,Wperm,Vmap (§3).
+"""Balanced k-means on head rows -> Cnorm,Wperm,Vmap.
 Exact balance K*cap==V (Qwen3: no padding). Constrained Lloyd: unbalanced settle,
 then capacity-greedy assignment. balanced_assign asserts exact balance.
 Usage: `uv run turbohead-build-clusters [--cap 16 | --clusters K]`.
@@ -118,10 +118,10 @@ def build(W, assign, cap):
     # tokens of each cluster, packed in cluster order
     order = np.argsort(assign, kind="stable")  # groups by cluster, cap each
     Vmap = order.reshape(K, cap).astype(np.int64)
-    Wperm = W[order].reshape(K, cap, D).astype(np.float16)  # §7 v1: fp16
+    Wperm = W[order].reshape(K, cap, D).astype(np.float16)  # stored fp16
     centroids = np.stack([W[Vmap[k]].mean(0) for k in range(K)])  # recompute from final members
     cn = centroids / np.linalg.norm(centroids, axis=1, keepdims=True)
-    Cnorm = cn.T.astype(np.float16)  # (D,K) columns, §3
+    Cnorm = cn.T.astype(np.float16)  # (D,K) columns
     return Cnorm, Wperm, Vmap
 
 

@@ -20,7 +20,7 @@ CLI:
     --profile      dump + summarize an ORT profile of one run
     --prompt STR   prompt text
     --temperature  0 = greedy argmax; >0 = sample over the probed candidate set (skips the
-                   ~2ms full-vocab softmax the dense head pays — see docs/NEXT_STEPS.md #4)
+                   ~2ms full-vocab softmax the dense head pays — see docs/ORT_QUIRKS.md #6)
     --seed N       RNG seed for sampling
 """
 import os

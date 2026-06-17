@@ -1,8 +1,8 @@
-"""Phase 2/3 — FlashHead subgraph, contract A (logits-shaped (1,V)). §2,§5,§6.
+"""FlashHead subgraph, contract A (logits-shaped (1,V)).
 make_flash_nodes(): nodes+inits to splice into a real model (hidden -> logits name).
 Standalone __main__: wrap with an `h` input, verify argmax == dense on real hidden states.
 
-Op chain (fp32 accumulation, §6.4):
+Op chain (fp32 accumulation):
   sims   = h @ Cnorm                      (1,K)
   top    = TopK(sims,P).indices           (1,P)
   rows   = Gather(Wperm,top) -> (P*cap,D)
@@ -175,7 +175,7 @@ def main():
     ap.add_argument("-P", "--probes", type=int, default=256)
     a = ap.parse_args()
     P = a.probes
-    special_ids = np.array([151643, 151645], np.int64)  # bos, eos (§6.5)
+    special_ids = np.array([151643, 151645], np.int64)  # bos, eos (Qwen3 ids; standalone verifier only)
 
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
     model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B", dtype=torch.float32)

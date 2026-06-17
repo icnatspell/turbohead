@@ -31,8 +31,8 @@ decode loop to run it, and gates to measure quality and speed.
 | `turbohead/inference/decode_loop.py` | **deploy** — the only file needed to *run* a spliced model (raw ORT + numpy + tokenizer; also the profiler). Drives standard, hybrid, and embeds-in models |
 | `turbohead/eval/` | **gates** — `benchmark.py` (speed matrix), `head_quality.py` (agreement/PPL), `agreement.py`/`ppl.py` (spot-checks) |
 | `csrc/turbohead_op.cc` | the fused stage-2 custom CPU op (`build.sh` → `libturbohead.so`) |
-| `docs/RESULTS.md` | **the numbers** — 8-model speed×quality matrix + per-model reproduce commands |
-| `docs/NEXT_STEPS.md` | current state + open items · `docs/PLAN.md` design spec · `docs/ORT_QUIRKS.md` ORT CPU operator quirks |
+| `docs/RESULTS.md` | **the numbers** — 8-model speed×quality matrix, key findings, per-model reproduce commands, open items |
+| `docs/ORT_QUIRKS.md` | measured ONNXRuntime CPU operator quirks (the *why* behind the precision/op choices) |
 
 ---
 
