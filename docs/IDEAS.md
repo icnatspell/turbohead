@@ -196,6 +196,43 @@ Stage 1 already ran, so the second pass is just extra gathers in stage 2. This s
 "can we predict required-P" question by measuring uncertainty after a cheap first look. A low-risk
 variant of the adaptive-probing thesis.
 
+## Beyond the head: the KV cache (body, orthogonal to FlashHead)
+
+These attack why tokens-per-second *drops as the context grows*, which is a body problem the head
+cannot touch. Decode per-step latency on Qwen3-0.6B is roughly `19 ms + 0.05 ms × S` (S = context
+length): a fixed floor (the int4 body matmuls) plus a term that grows linearly with how many tokens
+are already in the cache. That linear term is the **KV cache** (the stored keys/values every new
+token attends to). It splits in two: the *fundamental* part is attention reading the whole cache
+once per step; the *avoidable* part is copying the cache in and out each step.
+
+### 6. Buffer-shared KV cache (DONE, positive — shipped in `decode_loop.py`)
+
+The default decode loop fed the cache back as numpy every step, so ONNX Runtime reallocated and
+copied the entire cache (about 224 KB per token) on every token. `share_kv` instead pre-allocates
+one fixed max-length buffer per layer and tells the attention op to write each new key/value
+*in place* (bind past-input and present-output to the same memory; the attention op learns the
+valid length from a full-width attention mask). No reallocation, no copy.
+
+**Result: byte-identical output, the per-step growth slope roughly halves** (~53 → ~23 ms per 1000
+context tokens), giving ~1.2× decode at 400 tokens and more as context grows. Measured against
+onnxruntime-genai's own runtime on the same graph, which hits the same slope, so this is the
+expected ceiling for the copy fix. POC and A/Bs in `logs/buffershare_poc.py`, `logs/genai_kv_poc.py`,
+`logs/kv_scaling_poc.py`.
+
+### 7. Quantized (int8 / int4) KV cache
+
+After buffer-sharing, the part of the slope that remains is attention *reading* the fp32 cache. Store
+the cache in int8 or int4 instead of fp32 and that read moves 4× or 8× fewer bytes, shrinking the
+residual slope. *What it is:* the same idea as int4 weights (`MatMulNBits`) applied to the keys and
+values, dequantized on the fly inside attention.
+
+The blocker is purely kernel support: ONNX Runtime's CPU `GroupQueryAttention` only handles
+fp32/fp16 cache today, and `-p fp16 -e cpu` from the genai builder drops both the int4 body and the
+GQA op and then crashes on CPU. So this is not a re-export — it is a **custom attention op** with a
+quantized cache, the same class of effort as the FlashHead op, with the extra wrinkle that the cache
+read is strided rather than one dense matmul. High ceiling on long-context throughput, real build
+cost. Park behind shipping #6 broadly.
+
 ## Not worth it
 
 - **Variable cluster size by token importance.** Fights the equal-size kernel requirement (the
@@ -208,10 +245,14 @@ variant of the adaptive-probing thesis.
 
 1. Cascade probing (low-risk variant of adaptive probing). Untested.
 
-Done, positive: coverage correction (#4). Corrected-`Z` likelihood matches gold PPL (10277 down to
+Done, positive: buffer-shared KV (#6), shipped — halves the per-step-vs-length slope, byte-identical.
+Coverage correction (#4). Corrected-`Z` likelihood matches gold PPL (10277 down to
 9.76) when the token is known, which unblocks PPL evaluation and the spec-decode acceptance test.
 Promote to implementation: store the per-cluster mean-logit norms in the npz, and add the tail term
 where the head emits probabilities.
+
+Next on the body axis: quantized KV cache (#7), a custom attention op — the high-ceiling lever for
+long-context throughput once buffer-sharing is in everywhere.
 
 Parked: MIPS-aware ranking (#3), because the POC showed cosine already beats every inner-product
 and norm-bound routing on top-1. Hierarchical stage-1 (#1), because the POC showed it is
