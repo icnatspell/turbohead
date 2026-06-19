@@ -46,14 +46,18 @@ class Decoder:
     Dims (layers, KV heads, head size), head contract, tokenizer and EOS are all
     discovered from the model dir — nothing model-specific is hardcoded.
 
-    KV cache flows present->past as numpy. ponytail: IOBinding zero-copy KV was tried and
-    is a net loss here — contract A must pull `logits` to numpy for argmax anyway, and
-    reusing ORT-allocated output buffers as next-step inputs is a use-after-free (ORT
-    recycles the arena -> segfault). IOBinding pays off only under contract B (token-out,
-    tiny outputs, everything device-side); revisit it when the token-out graph exists.
+    KV cache: by default flows present->past as numpy (a full copy of the cache in and out
+    every step -> O(S) traffic/step, the dominant cost at long context). `share_kv` instead
+    pre-allocates one max-length OrtValue per growing KV tensor and binds past-in and
+    present-out to it via IOBinding, so GQA writes the new k/v IN PLACE (seqlens come from a
+    MAX-width attention_mask). Byte-identical output, ~halves the per-step-vs-length slope
+    (logs/buffershare_poc.py). The earlier IOBinding dead-end was reusing ORT-*allocated*
+    output buffers as next inputs (arena recycle -> segfault); a persistent *user*-allocated
+    buffer bound to both sides is the supported pattern and sidesteps that. Auto-enabled for
+    pure-KV transformers; hybrids with fixed conv/SSM state fall back to the numpy path.
     """
 
-    def __init__(self, model_dir, threads=1, profile=False):
+    def __init__(self, model_dir, threads=1, profile=False, share_kv=True):
         self.dir = model_dir.rstrip("/")
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
@@ -94,6 +98,14 @@ class Decoder:
         keys = [i for i in state if i.name.endswith(".key")]
         self.n_layers = len(keys)
         self.kv_heads, self.head_size = (int(keys[0].shape[1]), int(keys[0].shape[3])) if keys else (0, 0)
+
+        # Buffer-shared KV (see class docstring): only for pure-KV transformers — every state input
+        # must have a symbolic (growing) seq dim, and the graph must take attention_mask (it drives
+        # GQA's seqlens, so a MAX-width mask sets the in-place buffer stride). Hybrids with fixed-size
+        # conv/SSM state, or graphs without attention_mask, keep the numpy feedback path.
+        all_growing = all(any(not isinstance(d, int) for d in i.shape[1:]) for i in state)
+        self.share_kv = share_kv and all_growing and "attention_mask" in self.in_names
+        self.head_out_names = [o for o in self.out_names if not o.startswith("present")]
 
         # Token feed: most graphs take input_ids; some (Qwen3.5) split the embedding lookup out and
         # want inputs_embeds — we do the lookup in numpy from the tied embedding (= head_W) — plus a
@@ -151,6 +163,41 @@ class Decoder:
         past = {name: od[pres] for name, pres in self.present_for.items()}
         return past, od
 
+    def _setup_shared(self, max_len):
+        """Pre-allocate one OrtValue per growing KV tensor (seq dim -> max_len) and bind past-in and
+        present-out to the SAME buffer, so GQA updates the cache in place. io.get_outputs() follows
+        binding order, so track it to find head outputs afterwards. max_len is also the mask width."""
+        self._max_len = max_len
+        self._bufs = {}
+        order = []
+        for i in self.sess.get_inputs():
+            if i.name not in self.present_for:
+                continue
+            dt = {"tensor(float)": np.float32, "tensor(float16)": np.float16}.get(i.type, np.float32)
+            shape = [1 if j == 0 else (d if isinstance(d, int) else max_len)
+                     for j, d in enumerate(i.shape)]
+            self._bufs[i.name] = ort.OrtValue.ortvalue_from_numpy(np.zeros(shape, dt))
+        self._io = self.sess.io_binding()
+        for name, buf in self._bufs.items():
+            self._io.bind_ortvalue_input(name, buf)
+            self._io.bind_ortvalue_output(self.present_for[name], buf)
+            order.append(self.present_for[name])
+        self._out_order = order + self.head_out_names
+
+    def _step_shared(self, tokens, total, start):
+        x = self.embed[tokens].astype(np.float32, copy=False) if self.embeds_in else tokens
+        self._io.bind_cpu_input("inputs_embeds" if self.embeds_in else "input_ids", x)
+        m = np.zeros((1, self._max_len), np.int64)   # width = buffer stride; ones = valid length
+        m[0, :total] = 1
+        self._io.bind_cpu_input("attention_mask", m)
+        if self.wants_position_ids:
+            self._io.bind_cpu_input("position_ids", self._pos(start, tokens.shape[1]))
+        for o in self.head_out_names:
+            self._io.bind_output(o, "cpu")           # head outputs are dynamic -> rebind each step
+        self.sess.run_with_iobinding(self._io)
+        got = self._io.get_outputs()
+        return {o: got[self._out_order.index(o)].numpy() for o in self.head_out_names}
+
     @staticmethod
     def _pick(logits, ids, temperature, rng):
         """Greedy (argmax) or temperature sampling over a candidate (logits, ids) shortlist."""
@@ -184,15 +231,22 @@ class Decoder:
         rng = np.random.default_rng(seed)
         ids = list(prompt_ids)
         n0 = len(ids)
-        past, od = self._step(np.array([ids], np.int64),
-                               np.ones((1, len(ids)), np.int64), self._empty_past(), 0)
+        if self.share_kv:
+            self._setup_shared(n0 + max_new + 1)
+
+        def step(toks, start, past):           # numpy path threads past in/out; shared path ignores it
+            if self.share_kv:
+                return None, self._step_shared(toks, len(ids), start)
+            return self._step(toks, np.ones((1, len(ids)), np.int64), past, start)
+
+        past = self._empty_past()
+        past, od = step(np.array([ids], np.int64), 0, past)
         nxt = self._select(od, temperature, rng)
         ids.append(nxt)
         t1 = time.perf_counter()
         gen = 1
         while nxt not in self.eos and gen < max_new:
-            past, od = self._step(np.array([[nxt]], np.int64),
-                                   np.ones((1, len(ids)), np.int64), past, len(ids) - 1)
+            past, od = step(np.array([[nxt]], np.int64), len(ids) - 1, past)
             nxt = self._select(od, temperature, rng)
             ids.append(nxt)
             gen += 1
@@ -246,13 +300,14 @@ def main():
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
     ap.add_argument("--temperature", type=float, default=0.0)  # 0 = greedy; >0 = probed-softmax sample
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--no-share-kv", action="store_true", help="disable in-place buffer-shared KV")
     a = ap.parse_args()
 
-    dec = Decoder(a.model_dir, a.threads, a.profile)
+    dec = Decoder(a.model_dir, a.threads, a.profile, share_kv=not a.no_share_kv)
     ids = dec.tok(a.prompt)["input_ids"]
     logger.info(f"{a.model_dir} | backend {dec.backend} (contract {dec.contract}) | "
                 f"{dec.n_layers}L kv_heads={dec.kv_heads} head_size={dec.head_size} | "
-                f"threads={a.threads} | temp={a.temperature}")
+                f"threads={a.threads} | temp={a.temperature} | share_kv={dec.share_kv}")
 
     rates, out = [], None
     for r in range(a.reps + (a.reps > 1)):        # one warmup when benchmarking

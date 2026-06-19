@@ -102,7 +102,11 @@ full-vocab softmax the dense head pays — so sampling speeds up more than greed
   only `-P`/`--stage1`/`--block-size` shape inference.
 - `onnx.checker` is deliberately skipped on save — it rejects genai's `com.microsoft` contrib ops; ORT
   load validates instead. The dense head node is removed but its weight initializer stays (tied embed).
-- IOBinding zero-copy KV is a net loss under contract A (must pull `logits` to numpy anyway; reusing
-  ORT output buffers as next-step inputs segfaults). See the `Decoder` docstring.
+- **Buffer-shared KV** (`decode_loop.py` `share_kv`, on by default) pre-allocates one max-length
+  OrtValue per growing KV tensor and binds past-in≡present-out so GQA writes in place (seqlens from a
+  MAX-width mask). Byte-identical, ~halves the per-step-vs-length slope → ~1.2× decode @400t on
+  Qwen3-0.6B fused, growing with context. Only the *user*-allocated-buffer IOBinding pattern works;
+  binding ORT-*allocated* output buffers back as inputs segfaults (arena recycle). Auto-disabled for
+  hybrids with fixed conv/SSM state. See the `Decoder` docstring + `logs/buffershare_poc.py`.
 - Code comments mark deliberate simplifications with `ponytail:`; non-obvious ORT op/precision choices
   point to `docs/ORT_QUIRKS.md` for the measured rationale.
