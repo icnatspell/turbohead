@@ -126,6 +126,102 @@ void FlashHeadSelectQ8(const Tensor<float>&   h,
     id[P * cap + s] = sid[s];
   }
 }
+
+// Argmax variants: fold the top-1 reduction into the streaming loop and emit a 1-element
+// shortlist (best logit + id). This is the CPU analog of the embedl Triton fused-argmax /
+// atomic-max kernels (arXiv 2603.14591 ref impl): on GPU those exist to cut HBM writes by
+// cap x and skip a reduction pass; on CPU there's no HBM/atomics, so it collapses to a running
+// max here. Streams the *same* P*cap*D weight bytes as the shortlist ops (the memory-bound
+// cost), so the only saving is the trailing write + Python-side argmax. Greedy-only by
+// construction (no shortlist to sample over). Same I/O names as FlashHeadSelect -> contract H
+// plumbing unchanged, N=1.
+void FlashHeadSelectArgmax(const Tensor<float>&   h,
+                           const Tensor<int64_t>& ti,
+                           const Tensor<float>&   Wperm,
+                           const Tensor<int64_t>& Vmap,
+                           const Tensor<float>&   Wspec,
+                           const Tensor<int64_t>& spec_ids,
+                           Tensor<float>&         cand_logits,
+                           Tensor<int64_t>&       cand_ids) {
+  const float*   hp  = h.Data();
+  const int64_t* tip = ti.Data();
+  const float*   W   = Wperm.Data();
+  const int64_t* V   = Vmap.Data();
+  const auto&    ws  = Wperm.Shape();          // [K, cap, D]
+  const int64_t  cap = ws[1], D = ws[2];
+  const int64_t  P   = ti.Shape()[0];
+  const int64_t  S   = spec_ids.Shape()[0];
+
+  float   best    = -INFINITY;
+  int64_t best_id = -1;
+  for (int64_t p = 0; p < P; ++p) {
+    const int64_t  c    = tip[p];
+    const float*   rows = W + c * cap * D;
+    const int64_t* vid  = V + c * cap;
+    for (int64_t r = 0; r < cap; ++r) {
+      const float* row = rows + r * D;
+      float dot = 0.f;
+      for (int64_t d = 0; d < D; ++d) dot += row[d] * hp[d];
+      if (dot > best) { best = dot; best_id = vid[r]; }
+    }
+  }
+  const float*   Ws  = Wspec.Data();
+  const int64_t* sid = spec_ids.Data();
+  for (int64_t s = 0; s < S; ++s) {
+    const float* row = Ws + s * D;
+    float dot = 0.f;
+    for (int64_t d = 0; d < D; ++d) dot += row[d] * hp[d];
+    if (dot > best) { best = dot; best_id = sid[s]; }
+  }
+  cand_logits.Allocate({1, 1})[0] = best;
+  cand_ids.Allocate({1, 1})[0]    = best_id;
+}
+
+void FlashHeadSelectQ8Argmax(const Tensor<float>&   h,
+                             const Tensor<int64_t>& ti,
+                             const Tensor<int8_t>&  Wperm,
+                             const Tensor<float>&   scale,
+                             const Tensor<int64_t>& Vmap,
+                             const Tensor<float>&   Wspec,
+                             const Tensor<int64_t>& spec_ids,
+                             Tensor<float>&         cand_logits,
+                             Tensor<int64_t>&       cand_ids) {
+  const float*   hp  = h.Data();
+  const int64_t* tip = ti.Data();
+  const int8_t*  W   = Wperm.Data();
+  const float*   sc  = scale.Data();
+  const int64_t* V   = Vmap.Data();
+  const auto&    ws  = Wperm.Shape();          // [K, cap, D]
+  const int64_t  cap = ws[1], D = ws[2];
+  const int64_t  P   = ti.Shape()[0];
+  const int64_t  S   = spec_ids.Shape()[0];
+
+  float   best    = -INFINITY;
+  int64_t best_id = -1;
+  for (int64_t p = 0; p < P; ++p) {
+    const int64_t  c    = tip[p];
+    const int8_t*  rows = W + c * cap * D;
+    const int64_t* vid  = V + c * cap;
+    const float*   rsc  = sc + c * cap;
+    for (int64_t r = 0; r < cap; ++r) {
+      const int8_t* row = rows + r * D;
+      float acc = 0.f;
+      for (int64_t d = 0; d < D; ++d) acc += (float)row[d] * hp[d];
+      float dot = acc * rsc[r];
+      if (dot > best) { best = dot; best_id = vid[r]; }
+    }
+  }
+  const float*   Ws  = Wspec.Data();
+  const int64_t* sid = spec_ids.Data();
+  for (int64_t s = 0; s < S; ++s) {
+    const float* row = Ws + s * D;
+    float dot = 0.f;
+    for (int64_t d = 0; d < D; ++d) dot += row[d] * hp[d];
+    if (dot > best) { best = dot; best_id = sid[s]; }
+  }
+  cand_logits.Allocate({1, 1})[0] = best;
+  cand_ids.Allocate({1, 1})[0]    = best_id;
+}
 }  // namespace
 
 extern "C" OrtStatus* ORT_API_CALL RegisterCustomOps(OrtSessionOptions* options,
@@ -136,10 +232,16 @@ extern "C" OrtStatus* ORT_API_CALL RegisterCustomOps(OrtSessionOptions* options,
       Ort::Custom::CreateLiteCustomOp("FlashHeadSelect", "CPUExecutionProvider", FlashHeadSelect)};
   static std::unique_ptr<Ort::Custom::OrtLiteCustomOp> op8{
       Ort::Custom::CreateLiteCustomOp("FlashHeadSelectQ8", "CPUExecutionProvider", FlashHeadSelectQ8)};
+  static std::unique_ptr<Ort::Custom::OrtLiteCustomOp> opA{
+      Ort::Custom::CreateLiteCustomOp("FlashHeadSelectArgmax", "CPUExecutionProvider", FlashHeadSelectArgmax)};
+  static std::unique_ptr<Ort::Custom::OrtLiteCustomOp> op8A{
+      Ort::Custom::CreateLiteCustomOp("FlashHeadSelectQ8Argmax", "CPUExecutionProvider", FlashHeadSelectQ8Argmax)};
   OrtCustomOpDomain* domain = nullptr;
   if (auto* st = api->CreateCustomOpDomain("turbohead", &domain)) return st;
   if (auto* st = api->CustomOpDomain_Add(domain, op.get())) return st;
   if (auto* st = api->CustomOpDomain_Add(domain, op8.get())) return st;
+  if (auto* st = api->CustomOpDomain_Add(domain, opA.get())) return st;
+  if (auto* st = api->CustomOpDomain_Add(domain, op8A.get())) return st;
   return api->AddCustomOpDomain(options, domain);
 }
  

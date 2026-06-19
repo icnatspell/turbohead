@@ -64,7 +64,7 @@ def read_eos(src):
 
 
 def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", block_size=128,
-           npz=CLUSTERS, head=HEAD_W, head_weight_dtype="fp32"):
+           npz=CLUSTERS, head=HEAD_W, head_weight_dtype="fp32", head_reduce="none"):
     """Splice the flash head into `src` -> `dst` using `backend` ('fused' or 'onnx').
     `npz`/`head` are the clustering assets for this model (default the Qwen3-0.6B paths)."""
     if backend not in DST_SUFFIX:
@@ -78,7 +78,7 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
     K, cap, D = Wperm.shape
     V = K * cap
     special_ids = np.asarray(read_eos(src), np.int64)
-    N = P * cap + len(special_ids)
+    N = 1 if head_reduce == "argmax" else P * cap + len(special_ids)
     Wspec = np.load(head)[special_ids]  # (S,D) fp32; stage-2 builders cast as needed
 
     copy_configs(src, dst)
@@ -105,7 +105,7 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
         # `logits` graph output already declared by the export — reused as-is (contract A)
     else:  # fused (contract H): emit the shortlist, drop the (1,V) logits output
         s2n, s2i = fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, "fh_hlast", ti1,
-                                      weight_dtype=head_weight_dtype)
+                                      weight_dtype=head_weight_dtype, reduce=head_reduce)
         nodes += s2n
         inits += s2i
         kept = [o for o in g.output if o.name != "logits"]
@@ -148,9 +148,13 @@ def main():
     ap.add_argument("--head-weight-dtype", default="fp32", choices=["fp32", "int8"],
                     help="fused stage-2 weight precision (int8 = FlashHeadSelectQ8, 4x less "
                          "head read; fused backend only)")
+    ap.add_argument("--head-reduce", default="none", choices=["none", "argmax"],
+                    help="fused stage-2 reduction: none = full shortlist (greedy+sampling); "
+                         "argmax = fold top-1 into the op, emit 1-elem shortlist (greedy-only; "
+                         "CPU analog of embedl fused-argmax/atomic kernels; fused backend only)")
     a = ap.parse_args()
     splice(a.src, a.dst, a.backend, a.probes, a.stage1, a.block_size, a.npz, a.head,
-           a.head_weight_dtype)
+           a.head_weight_dtype, a.head_reduce)
 
 
 if __name__ == "__main__":

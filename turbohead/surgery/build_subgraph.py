@@ -98,15 +98,21 @@ def onnx_stage2_nodes(Wperm, Vmap, Wspec, special_ids, P, hidden, ti1, logits_ou
 
 def fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, hidden, ti1,
                        logits_out="cand_logits", ids_out="cand_ids", pfx="fh_",
-                       weight_dtype="fp32"):
+                       weight_dtype="fp32", reduce="none"):
     """Stage 2, **contract H** (custom op): one op reads only the probed rows and emits the
     candidate (logits, ids) shortlist of length N = P*cap + S. No (P*cap,D) materialization,
     no (1,V), no scatter. Needs csrc/libturbohead.so registered at inference.
 
     weight_dtype: 'fp32' -> FlashHeadSelect (16.8MB/token read). 'int8' -> FlashHeadSelectQ8:
     Wperm stored per-output-channel int8 (4x less weight traffic; the head is memory-bound, so
-    this directly speeds the serial head — see docs/FUSED_HEAD_INT8.md). Specials stay fp32."""
+    this directly speeds the serial head — see docs/FUSED_HEAD_INT8.md). Specials stay fp32.
+
+    reduce: 'none' -> emit the full shortlist (greedy + sampling). 'argmax' -> the *Argmax op
+    variant folds the top-1 into the op and emits a 1-element shortlist (greedy-only; CPU analog
+    of the embedl fused-argmax/atomic Triton kernels). Same output names either way; with argmax
+    the graph's cand_* outputs are length 1."""
     K, cap, D = Wperm.shape
+    suffix = {"none": "", "argmax": "Argmax"}[reduce]
     def n(s):
         return pfx + s
     common = [
@@ -119,7 +125,7 @@ def fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, hidden, ti1,
         scale = (np.maximum(np.abs(rows).max(axis=1), 1e-9) / 127.0).astype(np.float32)
         q = np.clip(np.rint(rows / scale[:, None]), -127, 127).astype(np.int8).reshape(K, cap, D)
         nodes = [helper.make_node(
-            "FlashHeadSelectQ8",
+            "FlashHeadSelectQ8" + suffix,
             [hidden, ti1, n("Wperm_q8"), n("Wperm_scale"), n("Vmap"), n("Wspec"), n("spec_ids")],
             [logits_out, ids_out], domain="turbohead")]
         inits = [numpy_helper.from_array(q, n("Wperm_q8")),
@@ -128,7 +134,7 @@ def fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, hidden, ti1,
     if weight_dtype != "fp32":
         raise ValueError(f"weight_dtype must be 'fp32' or 'int8', got {weight_dtype!r}")
     nodes = [helper.make_node(
-        "FlashHeadSelect",
+        "FlashHeadSelect" + suffix,
         [hidden, ti1, n("Wperm"), n("Vmap"), n("Wspec"), n("spec_ids")],
         [logits_out, ids_out], domain="turbohead")]
     inits = [numpy_helper.from_array(Wperm.reshape(K, cap, D).astype(np.float32), n("Wperm"))] + common
