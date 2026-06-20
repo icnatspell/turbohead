@@ -16,5 +16,7 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: uv run ruff check turbohead/ tests/
-      # integration tests skip themselves without the model artifact (not built in CI)
+      # build the fused custom op so test_subgraph exercises the kernel (not just the onnx chain)
+      - run: bash csrc/build.sh
+      # integration tests (real spliced model) skip themselves without the artifact, not built in CI
       - run: uv run pytest -q

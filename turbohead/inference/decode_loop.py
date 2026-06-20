@@ -3,12 +3,15 @@
 This is the ONLY file you need to run inference on a turbohead-spliced model. It is
 self-contained (onnxruntime + numpy + a tokenizer); the surgery/ package is not imported.
 
-Greedy decode over a Qwen3 ONNX decoder via InferenceSession + manual KV cache.
+Greedy or temperature-sampling decode over any genai-style ONNX decoder via InferenceSession
++ manual KV cache. Dims, head contract, state layout, tokenizer and EOS are all discovered from
+the model dir — standard, hybrid (conv/SSM + attention) and embeds-in models, no per-model config.
 genai is only the offline baseline builder (see surgery/convert_baseline.sh).
 
-Two head contracts, auto-detected from the graph's outputs:
-  A (logits-out): graph emits `logits` (1,1,V); argmax taken here.   [current spliced graph]
-  B (token-out):  graph emits the next-token id directly; V never materialized.
+Three head contracts, auto-detected from the graph's outputs:
+  A (logits-out):   graph emits `logits` (1,1,V); argmax/sample here.        [onnx backend]
+  H (shortlist-out): the fused op emits (cand_logits, cand_ids); V never materialized. [fused]
+  B (token-out):    graph emits the next-token id directly; greedy only.
 
 Doubles as the profiler (--profile): per-op decode-step breakdown via ORT profiling.
 

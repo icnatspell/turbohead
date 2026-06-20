@@ -28,6 +28,9 @@ from turbohead.surgery.build_subgraph import (
     stage1_nodes, onnx_stage2_nodes, fused_stage2_nodes, quantize_stage1,
 )
 
+# Bare-CLI defaults for the ad-hoc single-model workflow (matches convert_baseline.sh's default
+# OUT + the flat artifacts/ paths the other eval/surgery tools default to). build_all.sh and the
+# README examples always pass --src/--npz/--head explicitly; these only seed a no-arg run.
 DEFAULT_SRC = "artifacts/qwen3_0_6b_int4_cpu"
 CLUSTERS = "artifacts/clusters.npz"
 HEAD_W = "artifacts/head_W.npy"
