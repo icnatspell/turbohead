@@ -67,7 +67,7 @@ reassignment over a 128k vocabulary, up to 1000 times, is the kind of step that 
 We minimize squared Euclidean distance:
 
 ```
-argmin ||x - c||^2  ==  argmax (x·c - 0.5||c||^2)   # build_clusters.py:19
+argmin ||x - c||^2  ==  argmax (x·c - 0.5||c||^2)   # build_clusters.py assign_scores()
 ```
 
 and normalize only the final centroids, once, for routing (`build()`, line 123). The paper

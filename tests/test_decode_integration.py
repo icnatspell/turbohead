@@ -52,7 +52,7 @@ def dec():
     return Decoder(MODEL, threads=1)
 
 
-@pytest.mark.skipif(not os.path.isdir(FUSED), reason=f"{FUSED} not built (run splice_fused)")
+@pytest.mark.skipif(not os.path.isdir(FUSED), reason=f"{FUSED} not built (turbohead-splice --backend fused)")
 def test_fused_greedy_matches_contract_a(dec):
     """The fused custom-op kernel (contract H) must reproduce the contract-A graph exactly.
     Gate measured 100% over 12 prompts x 128 tokens incl. -ffast-math; a couple here guard it."""

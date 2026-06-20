@@ -172,7 +172,7 @@ produce identical quality; the decode loop auto-detects which one a model uses f
   matmul → `ScatterElements`), producing full `(1, V)` logits. Runs on any stock `onnxruntime`, no
   native code. The portable path.
 - **`--backend fused` (contract H)** — same stage 1, but stage 2 collapses into a single custom CPU
-  op, `turbohead::FlashHeadSelect` (`csrc/turbohead_op.cc`, ~80 lines). The fastest path.
+  op, `turbohead::FlashHeadSelect` (`csrc/turbohead_op.cc`). The fastest path.
 
 ### The fused kernel
 
