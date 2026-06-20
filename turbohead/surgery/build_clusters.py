@@ -1,7 +1,8 @@
 """Balanced k-means on head rows -> Cnorm,Wperm,Vmap.
 Exact balance K*cap==V (Qwen3: no padding). Constrained Lloyd: unbalanced settle,
-then capacity-greedy assignment. balanced_assign asserts exact balance.
-Usage: `uv run turbohead-build-clusters [--cap 16 | --clusters K]`.
+then capacity-greedy assignment (anisotropic/MIPS-aware when --eta>1). balanced_assign asserts
+exact balance.
+Usage: `uv run turbohead-build-clusters [--cap 16 | --clusters K] [--eta 4.0]`.
 
 cap = tokens per cluster = FlashHead's cluster ratio (DEFAULT_CLUSTER_RATIO=16); K = V/cap.
 cap must divide V exactly (V=151936=2^7*1187 for Qwen3-0.6B -> cap in {1,2,4,8,16,32,64,128,...})."""
@@ -11,19 +12,30 @@ import numpy as np
 from loguru import logger
 
 CAP = 16  # K = V/cap = 9496 for Qwen3-0.6B
+ETA = 4.0  # ScaNN anisotropy; 1.0 = plain k-means. 4.0 graduated as default (free +0.85pp agree).
 CHUNK = 4096
 
 
-def assign_scores(X, C, cnorm2):
-    # argmin ||x-c||^2 == argmax (x·c - .5||c||^2); returns (scores matrix in chunks via caller)
-    return X @ C.T - 0.5 * cnorm2  # (n, K)
+def assign_scores(X, C, cnorm2, eta=1.0, xn=None):
+    # argmin ||x-c||^2 == argmax (x·c - .5||c||^2); returns (scores matrix in chunks via caller).
+    # eta>1 adds ScaNN's anisotropic penalty (Guo et al., ICML 2020): down-weight a centroid that
+    # mismatches x along x's OWN direction (the parallel residual, the only part that moves an inner
+    # product). MIPS-aware partition, zero inference cost. eta=1 is byte-identical to plain k-means.
+    XC = X @ C.T  # (n, K)
+    sc = XC - 0.5 * cnorm2
+    if eta != 1.0:  # par = (x - c)·x̂ = ||x|| - c·x̂  ; penalise its square. xn = ||x|| (per chunk).
+        par = xn[:, None] - XC / xn[:, None]
+        sc = sc - 0.5 * (eta - 1.0) * par ** 2
+    return sc
 
 
-def balanced_assign(X, C, cap, max_rounds=25):
+def balanced_assign(X, C, cap, eta=1.0, max_rounds=25):
     """Capacity-greedy: each round, every active token bids its best non-full cluster;
-    clusters accept top-bidders up to free slots. Monotonic -> terminates."""
+    clusters accept top-bidders up to free slots. Monotonic -> terminates.
+    eta>1 scores bids with the anisotropic (MIPS-aware) penalty; eta=1 is plain k-means."""
     V, K = X.shape[0], C.shape[0]
     cnorm2 = (C * C).sum(1)
+    xn = np.linalg.norm(X, axis=1) + 1e-9  # ||x|| per token, for the anisotropic penalty
     assign = np.full(V, -1, np.int64)
     free = np.full(K, cap, np.int64)
     active = np.arange(V)
@@ -33,7 +45,8 @@ def balanced_assign(X, C, cap, max_rounds=25):
         best_c = np.empty(active.size, np.int64)
         best_s = np.empty(active.size, np.float32)
         for i in range(0, active.size, CHUNK):
-            sc = assign_scores(X[active[i : i + CHUNK]], C, cnorm2)
+            blk = active[i : i + CHUNK]
+            sc = assign_scores(X[blk], C, cnorm2, eta, xn[blk])
             sc[:, full_mask] = -np.inf
             best_c[i : i + CHUNK] = sc.argmax(1)
             best_s[i : i + CHUNK] = sc[np.arange(sc.shape[0]), sc.argmax(1)]
@@ -69,7 +82,7 @@ def balanced_assign(X, C, cap, max_rounds=25):
         logger.info(f"sequential finish for {active.size} tokens")
         for i in range(0, active.size, CHUNK):
             blk = active[i : i + CHUNK]
-            sc = X[blk] @ C.T - 0.5 * cnorm2  # (blk, K)
+            sc = assign_scores(X[blk], C, cnorm2, eta, xn[blk])  # (blk, K)
             sc[:, free == 0] = -np.inf
             for j, tok in enumerate(blk):
                 c = int(sc[j].argmax())
@@ -86,11 +99,11 @@ def centroids_from(W, assign, K, cap):
     return W[order].reshape(K, cap, W.shape[1]).mean(1)  # exact cap each
 
 
-def kmeans(W, K, cap, settle_iters=15, balanced_iters=5):
+def kmeans(W, K, cap, eta=1.0, settle_iters=15, balanced_iters=5):
     V, D = W.shape
     rng = np.random.default_rng(0)
     C = W[rng.choice(V, K, replace=False)].copy()
-    for it in range(settle_iters):  # unbalanced Lloyd settles good centroids fast
+    for it in range(settle_iters):  # unbalanced Lloyd settles good centroids fast (isotropic warm start)
         cnorm2 = (C * C).sum(1)
         a = np.empty(V, np.int64)
         for i in range(0, V, CHUNK):
@@ -103,11 +116,13 @@ def kmeans(W, K, cap, settle_iters=15, balanced_iters=5):
         shift = np.linalg.norm(newC - C)
         C = newC
         logger.info(f"settle iter {it}: shift {shift:.3f}")
-    # constrained Lloyd: balanced assign <-> recompute centroids from balanced members
-    assign = balanced_assign(W, C, cap)
+    # constrained Lloyd: balanced (anisotropic if eta>1) assign <-> mean centroid from balanced members.
+    # The member mean is kept on purpose: ScaNN's closed-form centroid was tested and lost (cosine
+    # routing discards the magnitude it tunes). See experimental/anisotropic_clustering/.
+    assign = balanced_assign(W, C, cap, eta)
     for it in range(balanced_iters):
         C = centroids_from(W, assign, K, cap)
-        assign = balanced_assign(W, C, cap)
+        assign = balanced_assign(W, C, cap, eta)
         logger.info(f"balanced iter {it} done")
     return C, assign
 
@@ -133,6 +148,9 @@ def main():
     g.add_argument("--cap", type=int, default=CAP,
                    help="tokens per cluster = cluster ratio (default 16). K = V/cap")
     g.add_argument("--clusters", type=int, help="number of clusters K; sets cap = V/K")
+    ap.add_argument("--eta", type=float, default=ETA,
+                    help="ScaNN anisotropy (default 4.0): parallel-error weight in the partition. "
+                         "1.0 = plain k-means. >1 lifts top-1 agreement at zero inference cost.")
     a = ap.parse_args()
 
     W = np.load(a.head).astype(np.float32)
@@ -141,8 +159,8 @@ def main():
     K = V // cap
     knob = f"clusters={a.clusters}" if a.clusters else f"cap={cap}"
     assert K * cap == V, f"V={V} not divisible by {knob} (cap={cap}); pick a divisor of {V}"
-    logger.info(f"V={V} D={D} K={K} cap={cap}")
-    C, assign = kmeans(W, K, cap)
+    logger.info(f"V={V} D={D} K={K} cap={cap} eta={a.eta}")
+    C, assign = kmeans(W, K, cap, a.eta)
     Cnorm, Wperm, Vmap = build(W, assign, cap)
     np.savez(a.out, Cnorm=Cnorm, Wperm=Wperm, Vmap=Vmap)
     logger.info(f"saved {a.out}  Cnorm{Cnorm.shape} Wperm{Wperm.shape} Vmap{Vmap.shape}")
