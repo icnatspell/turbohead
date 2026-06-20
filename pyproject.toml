@@ -26,6 +26,7 @@ dependencies = [
 turbohead-decode = "turbohead.inference.decode_loop:main"
 turbohead-extract-head = "turbohead.surgery.extract_head:main"
 turbohead-build-clusters = "turbohead.surgery.build_clusters:main"
+turbohead-calibrate-misses = "turbohead.surgery.calibrate_misses:main"
 turbohead-build-subgraph = "turbohead.surgery.build_subgraph:main"
 turbohead-splice = "turbohead.surgery.splice:main"
 turbohead-quantize-head = "turbohead.surgery.quantize_head:main"

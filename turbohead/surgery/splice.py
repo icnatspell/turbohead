@@ -67,9 +67,11 @@ def read_eos(src):
 
 
 def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", block_size=128,
-           npz=CLUSTERS, head=HEAD_W, head_weight_dtype="fp32"):
+           npz=CLUSTERS, head=HEAD_W, head_weight_dtype="fp32", always_score=None):
     """Splice the flash head into `src` -> `dst` using `backend` ('fused' or 'onnx').
-    `npz`/`head` are the clustering assets for this model (default the Qwen3-0.6B paths)."""
+    `npz`/`head` are the clustering assets for this model (default the Qwen3-0.6B paths).
+    `always_score` (lever 4, docs/IDEAS.md #8): path to an .npy of token ids to always score —
+    unioned into the EOS specials so frequently-misrouted tokens can't be missed. None = off."""
     if backend not in DST_SUFFIX:
         raise ValueError(f"backend must be 'fused' or 'onnx', got {backend!r}")
     dst = dst or f"{src}{DST_SUFFIX[backend]}"
@@ -80,7 +82,12 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
     Cnorm, Wperm, Vmap = z["Cnorm"], z["Wperm"], z["Vmap"]
     K, cap, D = Wperm.shape
     V = K * cap
+    # always-scored specials: EOS/BOS, plus the calibrated frequent-miss ids if --always-score given.
     special_ids = np.asarray(read_eos(src), np.int64)
+    if always_score:
+        extra = np.load(always_score).astype(np.int64).ravel()
+        special_ids = np.unique(np.concatenate([special_ids, extra]))  # dedup; order doesn't matter
+        logger.info(f"always-score: +{len(extra)} ids -> {len(special_ids)} specials total")
     N = P * cap + len(special_ids)
     Wspec = np.load(head)[special_ids]  # (S,D) fp32; stage-2 builders cast as needed
 
@@ -151,9 +158,14 @@ def main():
     ap.add_argument("--head-weight-dtype", default="fp32", choices=["fp32", "int8"],
                     help="fused stage-2 weight precision (int8 = FlashHeadSelectQ8, 4x less "
                          "head read; fused backend only)")
+    ap.add_argument("--always-score", default=None,
+                    help="npy of token ids to ALWAYS score (lever 4, docs/IDEAS.md #8): unions them "
+                         "into the always-scored specials so frequently-misrouted tokens can't be "
+                         "missed (~free, lifts top-1 agreement). Omit to disable. Build with "
+                         "turbohead-calibrate-misses.")
     a = ap.parse_args()
     splice(a.src, a.dst, a.backend, a.probes, a.stage1, a.block_size, a.npz, a.head,
-           a.head_weight_dtype)
+           a.head_weight_dtype, a.always_score)
 
 
 if __name__ == "__main__":

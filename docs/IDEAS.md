@@ -133,6 +133,18 @@ shared length scale, so cosine is already close to inner product for ranking, mi
 length noise. The inner-product framing nudges the median (p50 4 vs 5) but loses the metric that
 matters (top-1). Parked.
 
+**Follow-up POC: three more free routing swaps, all lose.** See `logs/recall_lift_poc.py` (lever 1),
+12k WikiText-2 positions, held-out fit/eval split, cosine baseline agree@256 = 97.5%:
+
+| routing swap | agree@256 | why it fails |
+|---|---|---|
+| learned-`h` prototype (mean of the hidden states that select each cluster) | 89.9% | `K=9496` clusters but only ~6k calibration tokens, so most clusters are fit from 0–1 noisy samples; the embedding-mean centroid uses all 16 members and is far more stable |
+| mean-centered cosine (subtract the train-mean `h̄`) | 74.4% | the "common-mode" direction the hidden states share is *highly* discriminative for routing here, not removable noise — deleting it destroys the signal |
+| diagonal-whitened cosine (scale dims by `1/std(h)`) | 77.3% | same: the anisotropy-removal trick from embedding-similarity work does not transfer, because the centroids live in the same anisotropic space and rely on that structure |
+
+Conclusion across both POCs: **cosine-on-the-embedding-mean is at the ceiling for a single free
+linear routing pass.** Stop hunting for a better routing *matrix*; the remaining wins are elsewhere.
+
 ## Improves fidelity, not speed
 
 ### 4. Coverage-corrected probabilities
@@ -195,6 +207,53 @@ between the top two refined logits, and re-probe with more clusters only when th
 Stage 1 already ran, so the second pass is just extra gathers in stage 2. This sidesteps the hard
 "can we predict required-P" question by measuring uncertainty after a cheap first look. A low-risk
 variant of the adaptive-probing thesis.
+
+**POC result: tested, ~break-even with just raising `P`.** See `logs/recall_lift_poc.py` (lever 3),
+12k WikiText-2 positions. Probe `P0=64`, escalate to `P1=512` when the gap between the top-two
+*probed* exact logits is below a threshold. At threshold 2.0: 54.8% escalate, average `P=309`,
+agree 97.6% — essentially the same as fixed `P=256` (97.5%) for the same cost. The margin is a weak
+predictor because the failure mode is a winner you *didn't* probe, which the margin over the probed
+set cannot see. Confirms the "no cheap confidence signal" open problem above.
+
+We also tested the **exact-stop** variant (lever 2): probe in cosine order, stop the moment a
+provable upper bound (`mu_k·h + ‖h‖·radius_k`, Cauchy-Schwarz) says no unprobed cluster can beat the
+best logit found, giving a *guaranteed* exact top-1. It degenerates: average stop-`P` ≈ `K` (the
+whole vocab). The bound is far looser than the gaps between logits, so almost every cluster "could"
+still hold the winner — certifying the max costs as much as the dense head. Parked.
+
+### 8. Always-score the tokens FlashHead most often misses  ✅ implemented
+
+The other ideas chase the heavy tail in general. This one asks a narrower question: **are the misses
+the *same* tokens every time?** They partly are. The graph already always-scores a few special
+tokens (EOS/BOS) by stuffing their weight rows into the stage-2 `Wspec`/`spec_ids` path, scored
+every step regardless of routing. Lever 4 extends that list with the tokens a calibration pass found
+FlashHead routes badly — so they can never be missed, at the cost of a handful of extra scored rows.
+
+**POC result: the win.** See `logs/recall_lift_poc.py` (lever 4), 12k positions, held-out. Fitting
+the most-missed set on the train half and measuring on eval, a **64-token** always-score list
+rescues **52% of all misses → agree@256 rises 97.5% → 98.8%**. The curve plateaus immediately
+(top-64 = top-4096): about half the misses are a small set of frequent tokens (function words,
+punctuation) that route badly *independent of context*; the other half are idiosyncratic one-offs no
+fixed list can catch. The cost is ~free — the always-scored rows ride the existing `Wspec` path, a
+few dozen extra dot products per step against a ~17 MB-per-step head.
+
+Why it works where routing tricks don't: a chronically-misrouted frequent token has a bad *cluster
+assignment* (its embedding sits far from its cluster's centroid), so no stage-1 score will rank it
+in. Routing can't fix a bad assignment; always-scoring sidesteps routing for that token entirely.
+
+It **stacks** with simply raising `P` (`P=256→512` independently buys 97.5%→98.3%), so
+`always-score + P=512` reaches the ~99% region at modest cost.
+
+How to build/use it (this is what shipped):
+
+- **Calibrate** (offline, needs the HF model): `turbohead-calibrate-misses --model <hf> --npz
+  <clusters.npz> -P 256 --top 64 --out <dir>/always_score.npy`. One pass over WikiText-2: capture the
+  hidden states, find the dense argmax tokens whose cluster ranks below `P`, write the `--top` most
+  frequent ids. It is calibration-data- and model-specific (refit per model).
+- **Splice it in**: `turbohead-splice ... --always-score <dir>/always_score.npy`. Those ids are
+  unioned into the always-scored specials. **Omit the flag to turn lever 4 off** — that is the
+  on/off switch. `build_all.sh` runs the calibration and passes the flag automatically; set
+  `ALWAYS_SCORE=0` to skip it.
 
 ## Beyond the head: the KV cache (body, orthogonal to FlashHead)
 
@@ -276,8 +335,13 @@ cost. Park behind shipping #6 broadly.
 
 ## Suggested order
 
-1. Cascade probing (low-risk variant of adaptive probing). Untested.
+1. Raise `P` if more agreement is wanted (the only reliable knob on the idiosyncratic tail);
+   stacks with #8. `P=256→512` buys 97.5%→98.3% at ~+7% decode latency.
 
+Done, positive: always-score frequent misses (#8), shipped — `turbohead-calibrate-misses` +
+`turbohead-splice --always-score`, +1.3pp agreement (97.5%→98.8%) at ~free cost, on/off via the flag.
+Parked: free routing swaps (#3) and cascade/exact-stop (#5), both no better than fixed `P` — see
+`logs/recall_lift_poc.py`.
 Done, positive: buffer-shared KV (#6), shipped — halves the per-step-vs-length slope, byte-identical.
 Coverage correction (#4). Corrected-`Z` likelihood matches gold PPL (10277 down to
 9.76) when the token is known, which unblocks PPL evaluation and the spec-decode acceptance test.
