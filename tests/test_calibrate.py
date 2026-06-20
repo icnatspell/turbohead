@@ -1,4 +1,4 @@
-"""Unit test for lever-4 calibration ranking (numpy-only, no model needed)."""
+"""Unit test for the always-score calibration ranking (numpy-only, no model needed)."""
 import numpy as np
 from turbohead.surgery.calibrate_misses import most_missed
 

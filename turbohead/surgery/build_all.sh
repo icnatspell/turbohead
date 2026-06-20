@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the full head-comparison artifact set for one HF model, into its own artifacts/<slug>/ dir
 # (reusable — nothing shared between models). Reproducible end-to-end: genai int4 baseline -> head
-# weight -> clusters -> 4 dense-head variants + 2 flash splices (onnx contract-A, fused contract-H).
+# weight -> clusters -> 4 dense-head variants + 2 flash splices (onnx logits-out, fused shortlist-out).
 # Then bench/eval with the commands printed at the end.
 #
 #   bash turbohead/surgery/build_all.sh <hf-model> <slug> [cap] [P]
@@ -41,8 +41,8 @@ fi
 if [ "${FORCE:-0}" = 1 ] || [ ! -f "$HEAD" ]; then uv run turbohead-extract-head   --model "$MODEL" --out "$HEAD"; fi
 if [ "${FORCE:-0}" = 1 ] || [ ! -f "$NPZ"  ]; then uv run turbohead-build-clusters --head "$HEAD" --out "$NPZ" --cap "$CAP"; fi
 
-# lever 4 (docs/IDEAS.md #8): calibrate the always-score frequent-miss list (~free agreement lift).
-# Toggle with ALWAYS_SCORE: token count to keep (default 64), or 0 to disable lever 4 entirely.
+# Calibrate the always-score frequent-miss list (~free top-1 agreement lift): the tokens FlashHead
+# routes badly, always scored so they can't be missed. ALWAYS_SCORE = count to keep (default 64; 0 off).
 ALWAYS=${ALWAYS_SCORE:-64}
 ASARG=""
 if [ "$ALWAYS" != 0 ]; then
@@ -58,7 +58,7 @@ uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 8  --group-si
 uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 4  --group-size 128 --dst "$ROOT/head4g128"
 uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 4  --group-size 32  --dst "$ROOT/head4g32"
 
-# flash heads: portable onnx (contract A) + fused custom op (contract H). $ASARG adds lever 4.
+# flash heads: portable onnx (logits-out) + fused custom op (shortlist-out). $ASARG adds always-score.
 uv run turbohead-splice --backend onnx  --src "$BASE" --npz "$NPZ" --head "$HEAD" -P "$P" $ASARG --dst "$ROOT/onnx"
 uv run turbohead-splice --backend fused --src "$BASE" --npz "$NPZ" --head "$HEAD" -P "$P" $ASARG --dst "$ROOT/fused"
 

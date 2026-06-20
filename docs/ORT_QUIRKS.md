@@ -72,7 +72,7 @@ with 100% argmax agreement. It's the same op the quantized model body uses.
 for sampling (~2.2ms over V) — which you only pay if you softmax the whole `(1,V)`. Softmaxing
 just the scored candidates (≈4k) is ~0.05ms.
 **Takeaway:** don't fear the O(V) scatter; do avoid the O(V) softmax — sample over the candidate
-shortlist, not the full vocab. (Contract A's decode loop already does this via `row > -1e8`.)
+shortlist, not the full vocab. (logits-out's decode loop already does this via `row > -1e8`.)
 
 ## 7. Profiling inflates `model_run` — don't mix profiled and unprofiled timings
 
@@ -121,4 +121,4 @@ For a CPU custom op via `SessionOptions.register_custom_ops_library` (see `csrc/
   identical fed hidden states (eval/agreement.py: ~97%) is NOT comparable to free-running greedy
   generation (~62% same-position token match over 128 tokens): one early disagreement forks the
   whole trajectory. To validate a kernel reproduces a reference, compare both *free-running* on the
-  same prompts (fused vs contract-A = 100%); don't read free-running-vs-baseline as a quality drop.
+  same prompts (fused vs logits-out = 100%); don't read free-running-vs-baseline as a quality drop.

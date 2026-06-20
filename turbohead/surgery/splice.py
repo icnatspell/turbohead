@@ -3,9 +3,9 @@
 Two interchangeable backends — choose at splice time; the decode loop auto-detects which one a
 model uses, so the run command is identical either way:
 
-  onnx  — stage 2 as plain ONNX ops; emits full (1,V) logits (contract A). No native library,
+  onnx  — stage 2 as plain ONNX ops; emits full (1,V) logits (logits-out). No native library,
           maximal portability. Use when you need full-vocab logits or can't ship a .so.
-  fused — stage 2 as a single custom op; emits the candidate shortlist (contract H). Needs
+  fused — stage 2 as a single custom op; emits the candidate shortlist (shortlist-out). Needs
           csrc/libturbohead.so (build: bash csrc/build.sh). Fastest; greedy + sampling. Default.
 
 Both backends share stage 1 (int4 centroid scoring + TopK) and the same clustering assets; they
@@ -70,8 +70,8 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
            npz=CLUSTERS, head=HEAD_W, head_weight_dtype="fp32", always_score=None):
     """Splice the flash head into `src` -> `dst` using `backend` ('fused' or 'onnx').
     `npz`/`head` are the clustering assets for this model (default the Qwen3-0.6B paths).
-    `always_score` (lever 4, docs/IDEAS.md #8): path to an .npy of token ids to always score —
-    unioned into the EOS specials so frequently-misrouted tokens can't be missed. None = off."""
+    `always_score`: path to an .npy of token ids to always score (the frequently-misrouted ids from
+    turbohead-calibrate-misses), unioned into the EOS specials so they can't be missed. None = off."""
     if backend not in DST_SUFFIX:
         raise ValueError(f"backend must be 'fused' or 'onnx', got {backend!r}")
     dst = dst or f"{src}{DST_SUFFIX[backend]}"
@@ -112,8 +112,8 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
                                      "fh_logits2d")
         nodes += s2n + [helper.make_node("Reshape", ["fh_logits2d", "fh_shp_11V"], ["logits"])]
         inits += s2i + [_i64v("fh_shp_11V", [1, 1, V])]
-        # `logits` graph output already declared by the export — reused as-is (contract A)
-    else:  # fused (contract H): emit the shortlist, drop the (1,V) logits output
+        # `logits` graph output already declared by the export — reused as-is (logits-out)
+    else:  # fused (shortlist-out): emit the shortlist, drop the (1,V) logits output
         s2n, s2i = fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, "fh_hlast", ti1,
                                       weight_dtype=head_weight_dtype)
         nodes += s2n
@@ -146,7 +146,7 @@ def _i64v(name, arr):
 def main():
     ap = argparse.ArgumentParser(description="Splice TurboHead into a quantized genai ONNX model")
     ap.add_argument("--backend", default="fused", choices=["fused", "onnx"],
-                    help="fused = custom-op shortlist (contract H, fastest); onnx = portable (1,V) logits (contract A)")
+                    help="fused = custom-op shortlist (shortlist-out, fastest); onnx = portable (1,V) logits (logits-out)")
     ap.add_argument("--src", default=DEFAULT_SRC, help="baseline genai ONNX dir")
     ap.add_argument("--dst", default=None, help="output dir (default: <src><_fused|_onnx>)")
     ap.add_argument("--npz", default=CLUSTERS, help="clusters .npz for this model")
@@ -159,10 +159,9 @@ def main():
                     help="fused stage-2 weight precision (int8 = FlashHeadSelectQ8, 4x less "
                          "head read; fused backend only)")
     ap.add_argument("--always-score", default=None,
-                    help="npy of token ids to ALWAYS score (lever 4, docs/IDEAS.md #8): unions them "
-                         "into the always-scored specials so frequently-misrouted tokens can't be "
-                         "missed (~free, lifts top-1 agreement). Omit to disable. Build with "
-                         "turbohead-calibrate-misses.")
+                    help="npy of token ids to ALWAYS score: unions them into the always-scored "
+                         "specials so frequently-misrouted tokens can't be missed (~free, lifts "
+                         "top-1 agreement). Omit to disable. Build with turbohead-calibrate-misses.")
     a = ap.parse_args()
     splice(a.src, a.dst, a.backend, a.probes, a.stage1, a.block_size, a.npz, a.head,
            a.head_weight_dtype, a.always_score)

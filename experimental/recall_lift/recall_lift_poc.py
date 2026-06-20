@@ -21,7 +21,8 @@ Two levers, both aimed at "don't slow down at all":
     stop. This is guaranteed-correct by construction; the empirical question is the probe count it
     forces (avg and tail). Low avg => 100% agreement at ~current cost. High avg => too slow.
 
-Read-only research: touches nothing in the shipping path. Run: uv run python logs/recall_lift_poc.py
+Read-only research: touches nothing in the shipping path.
+Run: uv run python experimental/recall_lift/recall_lift_poc.py
 """
 import numpy as np
 import torch

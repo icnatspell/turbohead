@@ -1,5 +1,5 @@
-"""Lever 4 (docs/IDEAS.md #8): find the tokens FlashHead most often mis-routes, so the splice can
-ALWAYS score them and never miss them.
+"""Find the tokens FlashHead most often mis-routes, so the splice can ALWAYS score them and never
+miss them (turbohead-splice --always-score).
 
 Why this exists
 ---------------

@@ -130,14 +130,14 @@ slice and the win shows up.
 
 ## How to reproduce the headroom analysis
 
-The throwaway script lives at `logs/adaptive_probe_headroom.py`. It captures hidden states
+The throwaway script lives at `experimental/adaptive_probe_headroom/adaptive_probe_headroom.py`. It captures hidden states
 from the real model and prints the required-P distribution plus the oracle payoff table.
 
 ```bash
 # default: Qwen3-0.6B against artifacts/qwen3_0_6b/clusters.npz
-uv run python logs/adaptive_probe_headroom.py
+uv run python experimental/adaptive_probe_headroom/adaptive_probe_headroom.py
 # another model (edit the npz path in the script to match the slug)
-uv run python logs/adaptive_probe_headroom.py google/gemma-3-270m
+uv run python experimental/adaptive_probe_headroom/adaptive_probe_headroom.py google/gemma-3-270m
 ```
 
 To measure stage-2 latency vs `P` (the timing model behind the speedup columns), splice the

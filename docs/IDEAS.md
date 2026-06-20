@@ -64,7 +64,7 @@ nearest-neighbor search, applied one level up.) It is the only lever that lowers
 which adaptive probing cannot touch, and it matters most exactly where the paper is heading (large
 `K`).
 
-**POC result: tested, not worth it in the naive form.** See `logs/hierarchical_stage1_poc.py`.
+**POC result: tested, not worth it in the naive form.** See `experimental/hierarchical_stage1/hierarchical_stage1_poc.py`.
 On Qwen3-0.6B (4000 WikiText-2 positions, flat baseline agreement at P=256 is 96.8%):
 
 - Single-assignment 2-level routing (each leaf belongs to exactly one super-centroid): `M=64`
@@ -110,7 +110,7 @@ a per-cluster correction based on its radius or its largest-norm member. This is
 the data-aware routing prototype: swap the routing matrix, recompute required-P on the same hidden
 states. Fast to falsify and grounded in standard MIPS theory.
 
-**POC result: tested, no win.** See `logs/mips_routing_poc.py`. Same 4000 WikiText-2 positions,
+**POC result: tested, no win.** See `experimental/mips_routing/mips_routing_poc.py`. Same 4000 WikiText-2 positions,
 cosine baseline top-1 agreement at P=256 is 96.8%. Three routing swaps, with the cluster groups
 held fixed (only the ranking score changes). Lower required-P is better:
 
@@ -133,7 +133,7 @@ shared length scale, so cosine is already close to inner product for ranking, mi
 length noise. The inner-product framing nudges the median (p50 4 vs 5) but loses the metric that
 matters (top-1). Parked.
 
-**Follow-up POC: three more free routing swaps, all lose.** See `logs/recall_lift_poc.py` (lever 1),
+**Follow-up POC: three more free routing swaps, all lose.** See `experimental/recall_lift/recall_lift_poc.py` (lever 1),
 12k WikiText-2 positions, held-out fit/eval split, cosine baseline agree@256 = 97.5%:
 
 | routing swap | agree@256 | why it fails |
@@ -156,7 +156,7 @@ total probability mass, so add an analytic correction for the unprobed clusters 
 denominator `Z` honest, without scoring all `V` tokens. This makes likelihood and sampling
 first-class instead of needing the Monte-Carlo workaround the paper uses.
 
-**POC result: tested, clear win on the part that matters.** See `logs/coverage_correction_poc.py`.
+**POC result: tested, clear win on the part that matters.** See `experimental/coverage_correction/coverage_correction_poc.py`.
 Qwen3-0.6B, 1000 WikiText-2 positions, with the genuine corpus next-token as the target (not the
 model's own argmax, which would almost always be probed and hide the problem), `P=256`. At `P=256`,
 11.2% of real next-tokens land in an unprobed cluster, so the hole is material.
@@ -208,7 +208,7 @@ Stage 1 already ran, so the second pass is just extra gathers in stage 2. This s
 "can we predict required-P" question by measuring uncertainty after a cheap first look. A low-risk
 variant of the adaptive-probing thesis.
 
-**POC result: tested, ~break-even with just raising `P`.** See `logs/recall_lift_poc.py` (lever 3),
+**POC result: tested, ~break-even with just raising `P`.** See `experimental/recall_lift/recall_lift_poc.py` (lever 3),
 12k WikiText-2 positions. Probe `P0=64`, escalate to `P1=512` when the gap between the top-two
 *probed* exact logits is below a threshold. At threshold 2.0: 54.8% escalate, average `P=309`,
 agree 97.6% — essentially the same as fixed `P=256` (97.5%) for the same cost. The margin is a weak
@@ -229,7 +229,7 @@ tokens (EOS/BOS) by stuffing their weight rows into the stage-2 `Wspec`/`spec_id
 every step regardless of routing. Lever 4 extends that list with the tokens a calibration pass found
 FlashHead routes badly — so they can never be missed, at the cost of a handful of extra scored rows.
 
-**POC result: the win.** See `logs/recall_lift_poc.py` (lever 4), 12k positions, held-out. Fitting
+**POC result: the win.** See `experimental/recall_lift/recall_lift_poc.py` (lever 4), 12k positions, held-out. Fitting
 the most-missed set on the train half and measuring on eval, a **64-token** always-score list
 rescues **52% of all misses → agree@256 rises 97.5% → 98.8%**. The curve plateaus immediately
 (top-64 = top-4096): about half the misses are a small set of frequent tokens (function words,
@@ -275,8 +275,8 @@ valid length from a full-width attention mask). No reallocation, no copy.
 **Result: byte-identical output, the per-step growth slope roughly halves** (~53 → ~23 ms per 1000
 context tokens), giving ~1.2× decode at 400 tokens and more as context grows. Measured against
 onnxruntime-genai's own runtime on the same graph, which hits the same slope, so this is the
-expected ceiling for the copy fix. POC and A/Bs in `logs/buffershare_poc.py`, `logs/genai_kv_poc.py`,
-`logs/kv_scaling_poc.py`.
+expected ceiling for the copy fix. POC and A/Bs in `experimental/buffershare/buffershare_poc.py`, `experimental/genai_kv/genai_kv_poc.py`,
+`experimental/kv_scaling/kv_scaling_poc.py`.
 
 **Applicability.** On by default and verified byte-identical on the 6 pure-KV transformers (Qwen3
 0.6B/1.7B, Gemma3 270M/1B, Llama-3.2-1B, danube3-500M). Auto-disabled — falls back to the
@@ -341,7 +341,7 @@ cost. Park behind shipping #6 broadly.
 Done, positive: always-score frequent misses (#8), shipped — `turbohead-calibrate-misses` +
 `turbohead-splice --always-score`, +1.3pp agreement (97.5%→98.8%) at ~free cost, on/off via the flag.
 Parked: free routing swaps (#3) and cascade/exact-stop (#5), both no better than fixed `P` — see
-`logs/recall_lift_poc.py`.
+`experimental/recall_lift/recall_lift_poc.py`.
 Done, positive: buffer-shared KV (#6), shipped — halves the per-step-vs-length slope, byte-identical.
 Coverage correction (#4). Corrected-`Z` likelihood matches gold PPL (10277 down to
 9.76) when the token is known, which unblocks PPL evaluation and the spec-decode acceptance test.

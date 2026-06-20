@@ -33,6 +33,7 @@ decode loop to run it, and gates to measure quality and speed.
 | `csrc/turbohead_op.cc` | the fused stage-2 custom CPU op (`build.sh` → `libturbohead.so`) |
 | `docs/RESULTS.md` | **the numbers** — 8-model speed×quality matrix, key findings, per-model reproduce commands, open items |
 | `docs/ORT_QUIRKS.md` | measured ONNXRuntime CPU operator quirks (the *why* behind the precision/op choices) |
+| `experimental/` | tried-idea POCs, one standalone folder each (the evidence behind what shipped vs got parked); core depends on none of it |
 
 ---
 
@@ -74,7 +75,7 @@ MODEL=Qwen/Qwen3-0.6B OUT=$R/baseline bash turbohead/surgery/convert_baseline.sh
 uv run turbohead-extract-head   --model Qwen/Qwen3-0.6B --out $R/head_W.npy
 # 3. balanced k-means clustering assets        (cap=16; or --cap 32 / --clusters K)
 uv run turbohead-build-clusters --head $R/head_W.npy --out $R/clusters.npz --cap 16
-# 4. splice TurboHead in: portable (contract A) and fused (contract H, fastest)
+# 4. splice TurboHead in: portable (logits-out) and fused (shortlist-out, fastest)
 uv run turbohead-splice --backend onnx  --src $R/baseline --npz $R/clusters.npz --head $R/head_W.npy -P 256 --dst $R/onnx
 uv run turbohead-splice --backend fused --src $R/baseline --npz $R/clusters.npz --head $R/head_W.npy -P 256 --dst $R/fused
 # (build_all also builds dense-head baselines via turbohead-quantize-head --bits {16,8,4} for comparison)
@@ -107,15 +108,16 @@ uv run turbohead-decode artifacts/<slug>/fused --reps 5      # or .../onnx for t
 
 ```python
 from turbohead.inference.decode_loop import Decoder
-dec = Decoder("artifacts/<slug>/fused", threads=1)    # dims/contract/tokenizer auto-detected
+dec = Decoder("artifacts/<slug>/fused", threads=1)    # dims/output-shape/tokenizer auto-detected
 ids = dec.tok("Once upon a time,")["input_ids"]
 out, tok_s = dec.generate(ids, max_new=64)            # temperature=0.0 greedy; >0 samples
 print(dec.tok.decode(out))
 ```
 
-The loop auto-detects the head contract (**A** = full `(1,V)` logits, the `onnx` backend; **H** = the
-fused op's candidate shortlist, the `fused` backend; B = token-out) and the KV/SSM state layout — so
-it drives standard, hybrid (conv/SSM + attention), and embeddings-in models with no per-model config.
+The loop auto-detects the graph output shape (**logits-out** = full `(1,V)` logits, the `onnx`
+backend; **shortlist-out** = the fused op's candidate shortlist, the `fused` backend; **token-out** =
+the id directly) and the KV/SSM state layout — so it drives standard, hybrid (conv/SSM + attention),
+and embeddings-in models with no per-model config.
 
 | flag | default | what it does |
 |---|---|---|
@@ -168,10 +170,10 @@ call count), and a head-path rollup, so you see where each decode step spends it
 `turbohead-splice` emits one of two head implementations. Both share the same clustering math and
 produce identical quality; the decode loop auto-detects which one a model uses from its graph outputs.
 
-- **`--backend onnx` (contract A)** — pure ONNX standard ops (`MatMulNBits` → `TopK` → `Gather` →
+- **`--backend onnx` (logits-out)** — pure ONNX standard ops (`MatMulNBits` → `TopK` → `Gather` →
   matmul → `ScatterElements`), producing full `(1, V)` logits. Runs on any stock `onnxruntime`, no
   native code. The portable path.
-- **`--backend fused` (contract H)** — same stage 1, but stage 2 collapses into a single custom CPU
+- **`--backend fused` (shortlist-out)** — same stage 1, but stage 2 collapses into a single custom CPU
   op, `turbohead::FlashHeadSelect` (`csrc/turbohead_op.cc`). The fastest path.
 
 ### The fused kernel

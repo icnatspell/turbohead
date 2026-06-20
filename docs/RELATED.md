@@ -78,11 +78,11 @@ instead lose top-1; they are the "weaker baselines" at the end.)
   in that cluster. At inference it routes `h` to its context cluster and scores only that stored
   candidate set. *Relation to us:* almost our method, except it *learns* which tokens to consider
   from data, rather than grouping token embeddings by geometry. That learned routing is what our
-  cheap data-aware routing prototype failed to beat (`logs/dataaware_routing_poc.py`); L2S is what
+  cheap data-aware routing prototype failed to beat (`experimental/dataaware_routing/dataaware_routing_poc.py`); L2S is what
   doing it properly looks like, and on paper the method most likely to beat fixed clustering on
   coverage.
 
-  **POC result: coverage-bound at our data scale, lost to flat IVF.** See `logs/l2s_poc.py`
+  **POC result: coverage-bound at our data scale, lost to flat IVF.** See `experimental/l2s/l2s_poc.py`
   (group the context vectors into `G` clusters, candidate set per cluster = the union of observed
   best-tokens, plus a top-`F` most-frequent-tokens backstop; fit on 10,000 positions, evaluate on
   2,000).
@@ -119,7 +119,7 @@ recall versus number of candidates, and bytes read per candidate.
   (`IDEAS.md` #1).
 
   **POC result: promising on the algorithmic axis, conditional on hardware.** See
-  `logs/graph_mips_poc.py` (FAISS `IndexHNSWFlat` with inner-product distance, built over the
+  `experimental/graph_mips/graph_mips_poc.py` (FAISS `IndexHNSWFlat` with inner-product distance, built over the
   V=151,936 token rows; cost measured as `ndis`, the dot-products per query that FAISS reports). At
   matched top-1 recall, HNSW computes about 3x fewer dot products than flat IVF:
 

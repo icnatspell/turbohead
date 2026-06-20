@@ -1,4 +1,4 @@
-"""FlashHead subgraph, contract A (logits-shaped (1,V)).
+"""FlashHead subgraph builder — the portable onnx stage-2 chain that emits full (1,V) logits.
 make_flash_nodes(): nodes+inits to splice into a real model (hidden -> logits name).
 Standalone __main__: wrap with an `h` input, verify argmax == dense on real hidden states.
 
@@ -59,7 +59,7 @@ def stage1_nodes(Cnorm, P, hidden, pfx="fh_", stage1="int4"):
 
 
 def onnx_stage2_nodes(Wperm, Vmap, Wspec, special_ids, P, hidden, ti1, logits_out, pfx="fh_"):
-    """Stage 2, **contract A** (portable, no custom op): gather the P*cap candidate rows, dot with
+    """Stage 2, **logits-out** (portable, no custom op): gather the P*cap candidate rows, dot with
     h, scatter into a (1,V) -1e9 base -> full logits at `logits_out`.
 
     fp32 throughout: the CPU EP has no fp16 matmul kernel (it inserts a fp32 cast that costs more
@@ -99,7 +99,7 @@ def onnx_stage2_nodes(Wperm, Vmap, Wspec, special_ids, P, hidden, ti1, logits_ou
 def fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, hidden, ti1,
                        logits_out="cand_logits", ids_out="cand_ids", pfx="fh_",
                        weight_dtype="fp32"):
-    """Stage 2, **contract H** (custom op): one op reads only the probed rows and emits the
+    """Stage 2, **shortlist-out** (custom op): one op reads only the probed rows and emits the
     candidate (logits, ids) shortlist of length N = P*cap + S. No (P*cap,D) materialization,
     no (1,V), no scatter. Needs csrc/libturbohead.so registered at inference.
 
@@ -137,7 +137,7 @@ def fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, hidden, ti1,
 
 def make_flash_nodes(Cnorm, Wperm, Vmap, Wspec, special_ids, P, hidden, logits_out, pfx="fh_",
                      stage1="fp16"):
-    """Contract-A flash head as one block (stage1 + onnx stage2): `hidden` (1,D) -> (1,V) at
+    """logits-out flash head as one block (stage1 + onnx stage2): `hidden` (1,D) -> (1,V) at
     `logits_out`. Thin wrapper over stage1_nodes + onnx_stage2_nodes; kept for the standalone
     gate (build_standalone) and any caller wanting the whole subgraph in one call."""
     s1n, s1i, ti1 = stage1_nodes(Cnorm, P, hidden, pfx, stage1)

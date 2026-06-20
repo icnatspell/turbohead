@@ -4,8 +4,8 @@ Gates the core of the method: that the spliced graph computes the *exact* dense 
 (h·W_row) for every token it scores. Probing all K clusters (P=K) makes coverage total,
 so the flash output must reproduce the brute-force dense head bit-for-bit (stage 2 is fp32).
 
-  - onnx backend (contract A): pure standard ops, always runs.
-  - fused backend (contract H): the custom op; skipped unless csrc/libturbohead.so is built.
+  - onnx backend (logits-out): pure standard ops, always runs.
+  - fused backend (shortlist-out): the custom op; skipped unless csrc/libturbohead.so is built.
 """
 import os
 import numpy as np
@@ -40,7 +40,7 @@ def _session(model, so=None):
 
 
 def test_onnx_chain_matches_dense_head_when_probing_all():
-    """Contract A: P=K probes every cluster -> full (1,V) logits must equal the dense head."""
+    """logits-out: P=K probes every cluster -> full (1,V) logits must equal the dense head."""
     Wref, Cnorm, Wperm, Vmap, K, cap, D = _clusters()
     V = K * cap
     special_ids = np.array([0, 5], np.int64)
@@ -62,7 +62,7 @@ def test_onnx_chain_matches_dense_head_when_probing_all():
 @pytest.mark.skipif(not os.path.exists(LIB), reason=f"{LIB} not built (bash csrc/build.sh)")
 @pytest.mark.parametrize("weight_dtype, atol", [("fp32", 1e-4), ("int8", 5e-2)])
 def test_fused_op_matches_dense_head(weight_dtype, atol):
-    """Contract H: the custom op's shortlist logits/ids must equal the dense reference for every
+    """shortlist-out: the custom op's shortlist logits/ids must equal the dense reference for every
     scored token. int8 (FlashHeadSelectQ8) is per-row quantized -> looser tol, exact ids."""
     Wref, Cnorm, Wperm, Vmap, K, cap, D = _clusters()
     special_ids = np.array([0, 5], np.int64)

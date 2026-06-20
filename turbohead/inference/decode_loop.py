@@ -4,14 +4,14 @@ This is the ONLY file you need to run inference on a turbohead-spliced model. It
 self-contained (onnxruntime + numpy + a tokenizer); the surgery/ package is not imported.
 
 Greedy or temperature-sampling decode over any genai-style ONNX decoder via InferenceSession
-+ manual KV cache. Dims, head contract, state layout, tokenizer and EOS are all discovered from
++ manual KV cache. Dims, graph output shape, state layout, tokenizer and EOS are all discovered from
 the model dir — standard, hybrid (conv/SSM + attention) and embeds-in models, no per-model config.
 genai is only the offline baseline builder (see surgery/convert_baseline.sh).
 
-Three head contracts, auto-detected from the graph's outputs:
-  A (logits-out):   graph emits `logits` (1,1,V); argmax/sample here.        [onnx backend]
-  H (shortlist-out): the fused op emits (cand_logits, cand_ids); V never materialized. [fused]
-  B (token-out):    graph emits the next-token id directly; greedy only.
+Three graph-output shapes, auto-detected from the graph's outputs:
+  logits-out:    graph emits `logits` (1,1,V); argmax/sample here.               [onnx backend]
+  shortlist-out: the fused op emits (cand_logits, cand_ids); V never materialized. [fused backend]
+  token-out:     graph emits the next-token id directly; greedy only.
 
 Doubles as the profiler (--profile): per-op decode-step breakdown via ORT profiling.
 
@@ -23,7 +23,7 @@ CLI:
     --profile      dump + summarize an ORT profile of one run
     --prompt STR   prompt text
     --temperature  0 = greedy argmax; >0 = sample over the probed candidate set (skips the
-                   ~2ms full-vocab softmax the dense head pays — see docs/ORT_QUIRKS.md #6)
+                   ~2ms full-vocab softmax the dense head pays — see docs/ORT_QUIRKS.md)
     --seed N       RNG seed for sampling
 """
 import os
@@ -44,9 +44,9 @@ HEAD_NODE_HINTS = ("lm_head", "fh", "flash", "scatter", "gather", "argmax", "top
 
 
 class Decoder:
-    """Loads a Qwen3 ONNX decoder and runs greedy decode with a manual KV cache.
+    """Loads a spliced ONNX decoder and runs greedy or sampling decode with a manual KV cache.
 
-    Dims (layers, KV heads, head size), head contract, tokenizer and EOS are all
+    Dims (layers, KV heads, head size), graph-output shape, tokenizer and EOS are all
     discovered from the model dir — nothing model-specific is hardcoded.
 
     KV cache: by default flows present->past as numpy (a full copy of the cache in and out
@@ -54,12 +54,12 @@ class Decoder:
     pre-allocates one max-length OrtValue per growing KV tensor and binds past-in and
     present-out to it via IOBinding, so GQA writes the new k/v IN PLACE (seqlens come from a
     MAX-width attention_mask). Byte-identical output, ~halves the per-step-vs-length slope
-    (logs/buffershare_poc.py). The earlier IOBinding dead-end was reusing ORT-*allocated*
+    (experimental/buffershare/buffershare_poc.py). The earlier IOBinding dead-end was reusing ORT-*allocated*
     output buffers as next inputs (arena recycle -> segfault); a persistent *user*-allocated
     buffer bound to both sides is the supported pattern and sidesteps that. Auto-enabled for
     pure-KV transformers; hybrids with fixed conv/SSM state fall back to the numpy path.
 
-    Shared-KV limit (see docs/IDEAS.md #6): the buffer is FIXED-length (`max_kv`, default =
+    Shared-KV limit (see docs/IDEAS.md, the KV-cache section): the buffer is FIXED-length (`max_kv`, default =
     this request's prompt+max_new). It is also the memory ceiling (~224 KB/token on Qwen3-0.6B).
     A generation that would exceed it is clamped and STOPS EARLY -- we do not drop old tokens.
     We must not write past the buffer: GQA writes each k/v in place at offset=past_seq_len, so an
@@ -140,14 +140,14 @@ class Decoder:
                 raise FileNotFoundError(f"{self.dir}: inputs_embeds graph needs embed.npy or ../head_W.npy")
             self.embed = np.load(ep, mmap_mode="r")  # [V,D] tied embed; fancy-index gathers token rows
 
-        # Contract: A emits full `logits` (1,V); H emits the candidate shortlist
-        # (cand_logits, cand_ids) from the fused op; B emits the token id directly.
-        # `backend` is the human-facing label for which splice produced this model.
-        self.contract = ("A" if "logits" in self.out_names
-                         else "H" if "cand_logits" in self.out_names else "B")
-        self.backend = {"A": "onnx", "H": "fused", "B": "fused"}[self.contract]
-        self.token_out = ("logits" if self.contract == "A"
-                          else None if self.contract == "H"
+        # Graph output shape: 'logits-out' emits full `logits` (1,V); 'shortlist-out' emits the
+        # candidate shortlist (cand_logits, cand_ids) from the fused op; 'token-out' emits the token
+        # id directly. `backend` is the human-facing label for which splice produced this model.
+        self.contract = ("logits-out" if "logits" in self.out_names
+                         else "shortlist-out" if "cand_logits" in self.out_names else "token-out")
+        self.backend = {"logits-out": "onnx", "shortlist-out": "fused", "token-out": "fused"}[self.contract]
+        self.token_out = ("logits" if self.contract == "logits-out"
+                          else None if self.contract == "shortlist-out"
                           else next(n for n in self.out_names if not n.startswith("present.")))
 
     @staticmethod
@@ -224,17 +224,17 @@ class Decoder:
         return int(ids[rng.choice(ids.size, p=p)])
 
     def _select(self, od, temperature, rng):
-        """Pick the next token. H: argmax/sample over the fused op's shortlist. A: same,
-        but the candidate set is the (1,V) entries above the -1e9 fill (skips full-vocab
-        softmax). B: token-out, greedy only."""
-        if self.contract == "H":
+        """Pick the next token. shortlist-out: argmax/sample over the fused op's shortlist.
+        logits-out: same, but the candidate set is the (1,V) entries above the -1e9 fill (skips
+        full-vocab softmax). token-out: the graph already emits the id, greedy only."""
+        if self.contract == "shortlist-out":
             return self._pick(od["cand_logits"].reshape(-1), od["cand_ids"].reshape(-1),
                               temperature, rng)
-        if self.contract == "B":
+        if self.contract == "token-out":
             if temperature:
-                raise ValueError("temperature>0 needs logits; this graph is token-out (contract B)")
+                raise ValueError("temperature>0 needs logits; this graph only emits the token id")
             return int(np.asarray(od[self.token_out]).flat[-1])
-        row = np.asarray(od[self.token_out])                 # contract A: (1,1,V) logits
+        row = np.asarray(od[self.token_out])                 # logits-out: (1,1,V) logits
         row = row.reshape(-1, row.shape[-1])[-1]              # (V,) last position
         cand = np.flatnonzero(row > -1e8)                    # scored candidates (skip -1e9 fill)
         return self._pick(row[cand], cand, temperature, rng)
@@ -252,7 +252,7 @@ class Decoder:
                 raise ValueError(f"prompt ({n0}) exceeds shared-KV cap ({cap}); raise max_kv")
             # ponytail: at the cap we clamp and stop early, NOT drop-oldest. Sliding-window eviction
             # needs cache shift + per-model RoPE re-rotation (GQA ties pos==write-offset==seqlen);
-            # ~40-80 lossy lines -- see class docstring / docs/IDEAS.md #6. Add for real long-chat.
+            # ~40-80 lossy lines -- see class docstring / docs/IDEAS.md. Add for real long-chat.
             max_new = min(max_new, cap - n0 - 1)   # clamp so GQA never writes past the buffer
             self._setup_shared(cap)
 
@@ -329,7 +329,7 @@ def main():
 
     dec = Decoder(a.model_dir, a.threads, a.profile, share_kv=not a.no_share_kv, max_kv=a.max_kv)
     ids = dec.tok(a.prompt)["input_ids"]
-    logger.info(f"{a.model_dir} | backend {dec.backend} (contract {dec.contract}) | "
+    logger.info(f"{a.model_dir} | backend {dec.backend} ({dec.contract}) | "
                 f"{dec.n_layers}L kv_heads={dec.kv_heads} head_size={dec.head_size} | "
                 f"threads={a.threads} | temp={a.temperature} | share_kv={dec.share_kv}")
 

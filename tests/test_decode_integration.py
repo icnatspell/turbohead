@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from turbohead.inference.decode_loop import Decoder
 
-MODEL = "artifacts/qwen3_0_6b/onnx"    # contract-A (onnx backend)
-FUSED = "artifacts/qwen3_0_6b/fused"   # contract-H (fused custom op)
+MODEL = "artifacts/qwen3_0_6b/onnx"    # logits-out (onnx backend)
+FUSED = "artifacts/qwen3_0_6b/fused"   # shortlist-out (fused custom op)
 HYBRID = "artifacts/lfm2_5_350m/fused"  # hybrid (conv + sparse-index attention) — generic state path
 EMBEDS = "artifacts/qwen3_5_0_8b/fused"  # embeds-in (split embedding) + 3-D M-RoPE position_ids
 
@@ -53,8 +53,8 @@ def dec():
 
 
 @pytest.mark.skipif(not os.path.isdir(FUSED), reason=f"{FUSED} not built (turbohead-splice --backend fused)")
-def test_fused_greedy_matches_contract_a(dec):
-    """The fused custom-op kernel (contract H) must reproduce the contract-A graph exactly.
+def test_fused_greedy_matches_onnx(dec):
+    """The fused custom-op kernel (shortlist-out) must reproduce the onnx logits-out graph exactly.
     Gate measured 100% over 12 prompts x 128 tokens incl. -ffast-math; a couple here guard it."""
     fused = Decoder(FUSED, threads=1)
     for p in ("Once upon a time, in a small village,", "def fibonacci(n):"):
