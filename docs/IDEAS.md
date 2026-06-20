@@ -219,6 +219,39 @@ onnxruntime-genai's own runtime on the same graph, which hits the same slope, so
 expected ceiling for the copy fix. POC and A/Bs in `logs/buffershare_poc.py`, `logs/genai_kv_poc.py`,
 `logs/kv_scaling_poc.py`.
 
+**Applicability.** On by default and verified byte-identical on the 6 pure-KV transformers (Qwen3
+0.6B/1.7B, Gemma3 270M/1B, Llama-3.2-1B, danube3-500M). Auto-disabled — falls back to the
+numpy path, no regression — on the two models with fixed-size state (LFM2.5 hybrid conv/SSM,
+Qwen3.5), since the in-place trick needs every state tensor to grow by one row per step. The gate
+(`all state inputs grow` and `attention_mask` exists) fails closed: a model that doesn't qualify is
+slower, never wrong.
+
+**Limit: the buffer is finite, and we stop at it.** The buffer is pre-allocated to a fixed length
+(`max_kv`, default = exactly this request's `prompt + max_new`). The buffer length is also the memory
+ceiling: about 224 KB/token on Qwen3-0.6B, so a 2048 buffer is ~450 MB, a 32k buffer ~7 GB — that
+linear up-front cost is inherent to static KV, the same trade genai makes. **When a generation would
+exceed the buffer we clamp `max_new` and stop early; we do not drop old tokens.** We deliberately do
+*not* fall through to writing past the buffer: ORT's GQA writes each new key/value in place at offset
+= past-sequence-length, so an over-long write lands outside the allocated arena — an out-of-bounds
+write, i.e. segfault or silent corruption, not a graceful realloc (static KV has no growth path). The
+clamp is what turns that into a clean, deterministic short return.
+
+**To overcome it (sliding window / StreamingLLM), and why it is not a one-liner.** Generating past
+the cap without growing memory means evicting the oldest tokens. The hard part is that ORT's GQA
+derives the RoPE position, the write offset, and `seqlens_k` all from the *same* past-length value —
+you cannot ask it to "write at slot 1792 but rotate as if at absolute position 9000". So a plain ring
+buffer is impossible; the only correct shape is compaction: (1) left-shift every KV buffer to drop a
+chunk of oldest tokens (a copy, but rare if you drop in big chunks — amortized cheap), then (2)
+**re-rotate all surviving cached keys** into the compacted position frame, because the old keys were
+rotated at their original absolute positions and the next new key would otherwise be rotated at a
+small offset, breaking relative distances. Step (2) must replicate the model's exact RoPE (theta
+base, partial-rotary fraction, any scaling) per model, in numpy, and the result is no longer
+byte-identical to the reference — it is lossy by construction (dropped context changes output), so the
+clean A/B regression test stops being the safety net. Realistic size ~40–80 lines plus per-model RoPE
+care. Build it only for an actual long-running-chat workload that hits the cap; until then,
+`max_kv`-bounded early-stop is the correct, predictable default. (`local_window_size` on the GQA op
+only masks attention scope — it does *not* bound the cache memory, so it does not solve this.)
+
 ### 7. Quantized (int8 / int4) KV cache
 
 After buffer-sharing, the part of the slope that remains is attention *reading* the fp32 cache. Store

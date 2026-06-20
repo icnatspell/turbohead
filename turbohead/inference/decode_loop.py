@@ -55,10 +55,21 @@ class Decoder:
     output buffers as next inputs (arena recycle -> segfault); a persistent *user*-allocated
     buffer bound to both sides is the supported pattern and sidesteps that. Auto-enabled for
     pure-KV transformers; hybrids with fixed conv/SSM state fall back to the numpy path.
+
+    Shared-KV limit (see docs/IDEAS.md #6): the buffer is FIXED-length (`max_kv`, default =
+    this request's prompt+max_new). It is also the memory ceiling (~224 KB/token on Qwen3-0.6B).
+    A generation that would exceed it is clamped and STOPS EARLY -- we do not drop old tokens.
+    We must not write past the buffer: GQA writes each k/v in place at offset=past_seq_len, so an
+    over-long write lands outside the arena (OOB -> segfault/corruption), not a realloc. To go
+    past the cap you need sliding-window eviction, which is NOT cheap here: GQA ties RoPE-position,
+    write-offset and seqlens to one value, so a ring buffer is impossible -- you must left-shift
+    the cache (a copy) AND re-rotate every surviving key into the compacted position frame (exact
+    per-model RoPE; lossy, no longer byte-identical). ~40-80 lines; build only for real long-chat.
     """
 
-    def __init__(self, model_dir, threads=1, profile=False, share_kv=True):
+    def __init__(self, model_dir, threads=1, profile=False, share_kv=True, max_kv=None):
         self.dir = model_dir.rstrip("/")
+        self.max_kv = max_kv          # fixed shared-KV buffer length (None = size to each request)
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads
         if profile:
@@ -232,7 +243,15 @@ class Decoder:
         ids = list(prompt_ids)
         n0 = len(ids)
         if self.share_kv:
-            self._setup_shared(n0 + max_new + 1)
+            need = n0 + max_new + 1
+            cap = self.max_kv or need
+            if n0 >= cap:
+                raise ValueError(f"prompt ({n0}) exceeds shared-KV cap ({cap}); raise max_kv")
+            # ponytail: at the cap we clamp and stop early, NOT drop-oldest. Sliding-window eviction
+            # needs cache shift + per-model RoPE re-rotation (GQA ties pos==write-offset==seqlen);
+            # ~40-80 lossy lines -- see class docstring / docs/IDEAS.md #6. Add for real long-chat.
+            max_new = min(max_new, cap - n0 - 1)   # clamp so GQA never writes past the buffer
+            self._setup_shared(cap)
 
         def step(toks, start, past):           # numpy path threads past in/out; shared path ignores it
             if self.share_kv:
@@ -301,9 +320,11 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.0)  # 0 = greedy; >0 = probed-softmax sample
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--no-share-kv", action="store_true", help="disable in-place buffer-shared KV")
+    ap.add_argument("--max-kv", type=int, default=None,
+                    help="fixed shared-KV buffer length, e.g. 2048 (default: size to each request)")
     a = ap.parse_args()
 
-    dec = Decoder(a.model_dir, a.threads, a.profile, share_kv=not a.no_share_kv)
+    dec = Decoder(a.model_dir, a.threads, a.profile, share_kv=not a.no_share_kv, max_kv=a.max_kv)
     ids = dec.tok(a.prompt)["input_ids"]
     logger.info(f"{a.model_dir} | backend {dec.backend} (contract {dec.contract}) | "
                 f"{dec.n_layers}L kv_heads={dec.kv_heads} head_size={dec.head_size} | "
