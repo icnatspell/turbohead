@@ -1,8 +1,9 @@
 # anisotropic_clustering
 
-**Status: WIN, free — the default agreement lever (+0.85pp @256, tail collapses, zero inference
-cost). Preferred over `multiple_assignment` unless you can spend ~25% decode latency for its larger
-gain; see `experimental/combinations/README.md` for the decision table.**
+**Status: GRADUATED as an opt-in `--eta` knob in `build_clusters.py` (default 1.0 = plain k-means).
+NOT a default win — it is PER-MODEL: on the real splice, `eta=4` helps Qwen3-0.6B (+0.2..+1.0pp
+across P) but REGRESSES gemma3-270m (-0.6pp @256). Sweep + validate per model before raising it. See
+the cross-model check in Findings.**
 
 ## Objective
 
@@ -66,9 +67,22 @@ equal-or-worse than the member mean at the deploy P (97.38% vs 97.60% @256, 93.6
 because cosine routing keeps only the direction and normalisation discards the magnitude the closed
 form tunes. Ship the member mean.
 
-**Promotion path:** add `--eta` to `surgery/build_clusters.py` (default 1.0 = current behaviour),
-keep the member-mean centroid (the closed form was tested and lost — see Findings), rebuild a full
-artifact, confirm the end-to-end agreement gain on the spliced model.
+**Cross-model check on the REAL splice (2026-06-20, `turbohead-agreement`, flash_top1 not the
+required_p proxy).** The PoC's proxy over-stated the win: the real flash_top1 lift on Qwen3-0.6B @256
+is +0.2pp, not the +0.85pp proxy. And it does not generalise:
+
+| model (D, V) | eta | @128 | @256 | @384 | @512 |
+|---|---|---|---|---|---|
+| Qwen3-0.6B (1024, 152k) | 1 → 4 | 94.0 → 95.0 | 96.9 → 97.1 | 97.7 → 98.2 | 98.0 → 98.8 |
+| gemma3-270m (640, 262k) | 1 → 4 | 91.4 → 91.2 | 94.8 → **94.2** | 96.4 → 96.4 | 97.3 → 97.2 |
+
+eta=4 helps Qwen at every P but regresses gemma at the deploy P. ScaNN's eta is dataset-specific, so a
+blanket default would silently hurt some models.
+
+**Promotion (done):** `--eta` is in `surgery/build_clusters.py` with default `1.0` (byte-identical to
+the historical build), member-mean centroid kept (the closed form was tested and lost). It is an
+opt-in per-model knob, not a default. Follow-up: a per-model eta sweep wired into `build_all.sh` so
+each artifact gets its own best eta with a real-splice agreement gate.
 
 **Does not stack with `multiple_assignment`:** both fix the same tail, so combining them adds almost
 nothing over `multiple_assignment` alone (see `experimental/combinations/`). They are alternatives, picked

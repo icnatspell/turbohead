@@ -2,7 +2,7 @@
 Exact balance K*cap==V (Qwen3: no padding). Constrained Lloyd: unbalanced settle,
 then capacity-greedy assignment (anisotropic/MIPS-aware when --eta>1). balanced_assign asserts
 exact balance.
-Usage: `uv run turbohead-build-clusters [--cap 16 | --clusters K] [--eta 4.0]`.
+Usage: `uv run turbohead-build-clusters [--cap 16 | --clusters K] [--eta E]` (eta default 1.0).
 
 cap = tokens per cluster = FlashHead's cluster ratio (DEFAULT_CLUSTER_RATIO=16); K = V/cap.
 cap must divide V exactly (V=151936=2^7*1187 for Qwen3-0.6B -> cap in {1,2,4,8,16,32,64,128,...})."""
@@ -12,7 +12,11 @@ import numpy as np
 from loguru import logger
 
 CAP = 16  # K = V/cap = 9496 for Qwen3-0.6B
-ETA = 4.0  # ScaNN anisotropy; 1.0 = plain k-means. 4.0 graduated as default (free +0.85pp agree).
+# ScaNN anisotropy. 1.0 = plain k-means; the safe default, byte-identical to the historical build.
+# eta>1 is a PER-MODEL knob, not a universal win: eta=4 lifts Qwen3-0.6B agreement (+0.2..+1.0pp across
+# P) but REGRESSES gemma3-270m (-0.6pp @256). Sweep per model before raising it.
+# Rationale + numbers: experimental/anisotropic_clustering/.
+ETA = 1.0
 CHUNK = 4096
 
 
@@ -149,8 +153,9 @@ def main():
                    help="tokens per cluster = cluster ratio (default 16). K = V/cap")
     g.add_argument("--clusters", type=int, help="number of clusters K; sets cap = V/K")
     ap.add_argument("--eta", type=float, default=ETA,
-                    help="ScaNN anisotropy (default 4.0): parallel-error weight in the partition. "
-                         "1.0 = plain k-means. >1 lifts top-1 agreement at zero inference cost.")
+                    help="ScaNN anisotropy (default 1.0 = plain k-means): parallel-error weight in the "
+                         "partition. eta>1 can lift top-1 agreement at zero inference cost, but it is "
+                         "PER-MODEL (helps Qwen3-0.6B, hurts gemma3-270m). Sweep before raising it.")
     a = ap.parse_args()
 
     W = np.load(a.head).astype(np.float32)

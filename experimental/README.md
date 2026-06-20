@@ -13,6 +13,7 @@ what shipped and what got parked. **Nothing in `turbohead/` or `csrc/` depends o
   shipping truth and an experiment can diverge freely.
 - **Promotion.** When an experiment proves out, lift its override into the corresponding core module
   (and delete or annotate the experiment). That is how `buffershare/` and `recall_lift/` graduated.
+  `anisotropic_clustering/` graduated as an opt-in `--eta` knob (not a default — see its row below).
 
 ## Index
 
@@ -20,7 +21,7 @@ what shipped and what got parked. **Nothing in `turbohead/` or `csrc/` depends o
 |---|---|---|
 | `multiple_assignment/` | give each token its top-r home clusters (overlapping IVF) so the tail is reachable | **win on quality** — r=2 → 99.0% agree@256, but costs ~25% decode (stage 2 is ~28% of the step) |
 | `targeted_second_home/` | second home only for the heavy-miss tokens — bake-off vs shipped always-score | parked — dominated; captures 84% of always-score's lift but always-score is already ~free and scores higher |
-| `anisotropic_clustering/` | ScaNN-style MIPS-aware partition (penalise parallel quantization error) | **win, free** — +0.85pp agree@256, tail collapses, zero inference cost; the default pick |
+| `anisotropic_clustering/` | ScaNN-style MIPS-aware partition (penalise parallel quantization error) | **shipped as opt-in** — `build_clusters.py --eta` (default 1.0); PER-MODEL: eta=4 helps Qwen3-0.6B, regresses gemma3-270m |
 | `whitened_routing/` | learned Mahalanobis routing metric folded into the centroids | parked — whitening hurts; LLM anisotropy is signal, not noise |
 | `factorized_router/` | product-quantized (cheap) router to afford a bigger P | parked — too lossy; can't beat exact even at 4× P |
 | `combinations/` | do levers stack or overlap? (first study: anisotropic_clustering × multiple_assignment) | aniso×multi do **not** stack (sub-additive); both fix the same tail, so ship one |
@@ -47,7 +48,7 @@ there. A few experiments sit off the head entirely.
 
 | folder | idea | verdict |
 |---|---|---|
-| [`anisotropic_clustering/`](anisotropic_clustering/) | penalise the *parallel* quantization error (ScaNN), the part that moves an inner product | **win, free** — +0.85pp agree@256, tail collapses |
+| [`anisotropic_clustering/`](anisotropic_clustering/) | penalise the *parallel* quantization error (ScaNN), the part that moves an inner product | **shipped as opt-in `--eta`** (default 1.0); per-model — helps Qwen3-0.6B, regresses gemma3-270m |
 | [`whitened_routing/`](whitened_routing/) | learned Mahalanobis metric folded into the centroids | parked — whitening hurts; the anisotropy is signal |
 | [`dataaware_routing/`](dataaware_routing/) | fit the routing matrix to data instead of embedding means | parked — no beat over cosine |
 
