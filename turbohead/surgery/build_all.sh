@@ -10,6 +10,7 @@
 # Layout: artifacts/<slug>/{baseline, head_W.npy, clusters.npz, head16, head8g128, head4g128,
 #         head4g32, onnx, fused}.
 # Idempotent: re-running skips the (slow) genai baseline if already built; set FORCE=1 to rebuild.
+# Optional: ETA_SWEEP="2 4" runs a per-model ScaNN-anisotropy sweep (agreement-gated) before splicing.
 set -euo pipefail
 
 MODEL=${1:?usage: build_all.sh <hf-model> <slug> [cap] [P]}
@@ -40,6 +41,35 @@ fi
 # head_W + clusters are deterministic and slow (clustering ~minutes); reuse unless FORCE=1.
 if [ "${FORCE:-0}" = 1 ] || [ ! -f "$HEAD" ]; then uv run turbohead-extract-head   --model "$MODEL" --out "$HEAD"; fi
 if [ "${FORCE:-0}" = 1 ] || [ ! -f "$NPZ"  ]; then uv run turbohead-build-clusters --head "$HEAD" --out "$NPZ" --cap "$CAP"; fi
+
+# OPTIONAL per-model ScaNN-anisotropy (eta) sweep. OFF by default; the standard build ships eta=1.
+# Set ETA_SWEEP="2 4" to enable: rebuild clusters at each eta, keep the one with the best real-splice
+# top-1 agreement @P, and ONLY if it beats isotropic eta=1 (eta is per-model: it helps some models and
+# regresses others, so the agreement gate is mandatory). Each extra eta costs one cluster rebuild
+# (~7-20 min by vocab size) + ~1 min agreement. Picked eta recorded in $ROOT/eta.txt.
+SWEEP=${ETA_SWEEP:-}
+if [ -n "$SWEEP" ] && { [ "${FORCE:-0}" = 1 ] || [ ! -f "$ROOT/eta.txt" ]; }; then
+  echo "== eta sweep: {1 $SWEEP}, real-splice agreement gate @P=$P =="
+  agree_at() {  # $1=npz -> top-1 agreement % at P=$P (agreement reports a fixed grid; 256 if P off-grid)
+    local gp=$P; case "$P" in 128|256|384|512) ;; *) gp=256;; esac
+    uv run turbohead-agreement --npz "$1" --model "$MODEL" 2>&1 \
+      | awk -v p="P=$gp " 'index($0,p){gsub(/%/,"",$NF); print $NF; exit}'
+  }
+  best_eta=1; best_ag=$(agree_at "$NPZ")
+  echo "   eta=1  agree@$P = ${best_ag:-?}%"
+  for e in $SWEEP; do
+    cand="$ROOT/clusters_eta$e.npz"
+    uv run turbohead-build-clusters --head "$HEAD" --out "$cand" --cap "$CAP" --eta "$e"
+    ag=$(agree_at "$cand")
+    echo "   eta=$e  agree@$P = ${ag:-?}%"
+    if [ -n "$ag" ] && [ -n "$best_ag" ] && awk "BEGIN{exit !($ag > $best_ag)}"; then
+      best_ag=$ag; best_eta=$e; cp "$cand" "$NPZ"   # promote: $NPZ now holds the best-so-far partition
+    fi
+    rm -f "$cand"
+  done
+  echo "$best_eta" > "$ROOT/eta.txt"
+  echo "== eta sweep: kept eta=$best_eta (agree@$P=${best_ag:-?}%) =="
+fi
 
 # Calibrate the always-score frequent-miss list (~free top-1 agreement lift): the tokens FlashHead
 # routes badly, always scored so they can't be missed. ALWAYS_SCORE = count to keep (default 64; 0 off).
