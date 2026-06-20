@@ -21,3 +21,6 @@ artifacts/
 # Custom-op build (reproduced by csrc/build.sh)
 csrc/include/
 csrc/*.so
+
+# Decode-loop debug dumps (run output, not source)
+logs/*_debug_logs.json
