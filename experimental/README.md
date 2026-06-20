@@ -27,7 +27,7 @@ what shipped and what got parked. **Nothing in `turbohead/` or `csrc/` depends o
 | `combinations/` | do levers stack or overlap? (first study: anisotropic_clustering × multiple_assignment) | aniso×multi do **not** stack (sub-additive); both fix the same tail, so ship one |
 | `recall_lift/` | four ways to raise top-1 agreement (better routing matrix, exact-stop, margin cascade, always-score) | **shipped** the always-score win (`turbohead-calibrate-misses`); 1–3 parked |
 | `buffershare/` | in-place buffer-shared KV cache via IOBinding | **shipped** (`decode_loop.py` `share_kv`) |
-| `coverage_correction/` | corrected softmax denominator for honest PPL when the token is known | win on likelihood; promote pending |
+| `coverage_correction/` | corrected softmax denominator for honest PPL when the token is known | parked — the honest report (covered PPL + coverage%) already ships in `eval/{ppl,head_quality}`; the corrected-Z denominator is a 0.01 PPL no-op |
 | `adaptive_probe_headroom/` | per-token required-P distribution (the adaptive-probing ceiling) | analysis behind `docs/THESIS_ADAPTIVE_PROBING.md` |
 | `mips_routing/` | rank clusters by inner product / norm-bound instead of cosine | parked — cosine already wins |
 | `hierarchical_stage1/` | coarse-to-fine (super-centroid) routing to cut the stage-1 floor | parked — coarse prune drops the hard tail |
@@ -84,7 +84,7 @@ there. A few experiments sit off the head entirely.
 
 | folder | idea | verdict |
 |---|---|---|
-| [`coverage_correction/`](coverage_correction/) | corrected softmax denominator for honest PPL when the token is known | win on likelihood; promote pending |
+| [`coverage_correction/`](coverage_correction/) | corrected softmax denominator for honest PPL when the token is known | parked — honest report already ships (`eval/{ppl,head_quality}` print covered PPL + coverage%); corrected-Z is a 0.01 PPL no-op |
 
 ### Off the head — the body / KV cache (orthogonal to FlashHead)
 
