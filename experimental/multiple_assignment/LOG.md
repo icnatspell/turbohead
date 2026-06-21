@@ -91,3 +91,48 @@ shipped centroids and `Cnorm` exactly as built. Give each token its next-best ce
 stage 2 gathers the same 4096 rows as the shipped P=256/cap=16, and TopK is cheaper at P=128, so it is
 a small NET speedup. Payoff is modest (+0.42pp agree, 96.75% -> 97.17%) but genuinely free. The big
 +2.25pp@256 r=2 still costs the ~25% from the cost check above; the cost-matched variant is the free slice.
+
+## 2026-06-21 — REAL BALANCED r=2 BUILD + int8 dissolves the cost (the graduation run)
+
+`build_r2.py`. Built the actual fixed-width r=2 table the fused op needs: kept the SHARP shipped
+centroids, ran a *balanced* 2nd assignment (greedy-capacity Lloyd, each token's primary cluster
+excluded) so every cluster gets exactly cap seconds -> table grows `(K,cap,D)` -> `(K,2cap,D)`,
+cap 16 -> 32. The op reads cap from `Wperm.Shape()[1]`, so no C++ change. Spliced `fused_r2`
+(fp32) and `fused_r2_q8` (int8); both load, run, decode coherent text.
+
+Agreement, 4000 real Qwen3-0.6B positions:
+
+| P   | r=1 fp32 (shipped) | r=2 fp32 | r=2 int8 | r2 gain | int8 drop |
+|-----|--------------------|----------|----------|---------|-----------|
+| 128 | 93.67%             | 96.97%   | 96.28%   | +3.30pp | -0.70pp   |
+| 256 | 96.75%             | 98.78%   | 98.00%   | +2.02pp | -0.78pp   |
+
+Two questions answered:
+1. **Does balancing the seconds keep the ceiling?** Yes. fp32 r=2 @256 = 98.78%, only 0.22pp under the
+   unbalanced ceiling (99.00%). Constraining each cluster to exactly cap seconds barely hurts — a
+   token's forced 2nd home is usually still a good route. Balancing is nearly free.
+2. **Does int8 survive?** Yes, with a small give-back. int8 costs 0.78pp (near-tied candidate
+   argmaxes flip under per-row quant noise), but r=2-int8 still ships **+1.25pp over shipped fp32 r=1**.
+
+End-to-end speed, single thread (this run's box was lightly loaded, so read ratios not absolutes):
+
+| head                 | tok/s @1t | vs shipped |
+|----------------------|-----------|------------|
+| fused fp32 r=1 (shipped) | 60.7  | 1.00x      |
+| fused_r2 fp32 r=2    | 58.6      | 0.96x      |
+| fused_q8 int8 r=1    | 63.2      | 1.04x      |
+| **fused_r2_q8 int8 r=2** | **61.5** | **1.01x** |
+
+**The "+2.25pp costs ~25% decode" verdict is DISSOLVED.** That was r=2-on-fp32. int8 halves the
+stage-2 bytes (8.4 vs 16.8 MB/token), so int8 r=2 is speed-NEUTRAL vs shipped fp32 r=1 (1.01x) while
+adding +1.25pp. fp32 r=2 alone costs only ~4% here (the doubled gather is bandwidth-hidden at 1
+thread), not 25% — the old estimate over-counted by assuming the gather doubles the whole 6.36 ms op
+including its fixed work. On the ARM board the head holds a bigger serial share, so int8 r=2 should
+pull AHEAD of shipped, not just break even. Earlier P=512 proxy (`fused_q8_P512`, same 8192 rows)
+measured 1.06x, bracketing this 1.01x as "roughly neutral, leaning faster".
+
+**Remaining before this fully ships:** dedup. A token in two probed clusters is scored twice in the
+shortlist. Harmless for greedy (same id/logit wins argmax — verified, decode coherent). For sampling
+it double-weights that token; needs a dedup in the fused op (C++) or the Python shortlist softmax. Not
+done here. Graduation into core also needs the balanced-2nd-assignment wired into `build_clusters.py`
+behind an `--r 2` flag.

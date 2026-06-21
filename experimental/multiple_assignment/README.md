@@ -1,7 +1,10 @@
 # multiple_assignment
 
-**Status: WIN on quality, but it costs ~25% decode speed (see the cost check). Promote candidate when
-agreement matters more than latency.**
+**Status: WIN — real balanced r=2 build done (`build_r2.py`, 2026-06-21). +1.25pp agree@256 (96.75 ->
+98.00) at SPEED-NEUTRAL cost once stage 2 is int8 (`fused_r2_q8`, 1.01x vs shipped). The old "~25%
+decode" was r=2-on-fp32; int8 halves the gather bytes and dissolves it. Ready to graduate into
+`build_clusters.py --r 2`; one open item: dedup a token that lands in two probed clusters (harmless for
+greedy, double-weights it for sampling). See LOG.md 2026-06-21.**
 
 ## Objective
 
