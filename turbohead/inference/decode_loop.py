@@ -39,6 +39,9 @@ from loguru import logger
 
 DEFAULT_PROMPT = "Once upon a time, in a small village,"
 
+# ORT input-type string -> numpy dtype for allocating state/KV buffers (default fp32).
+ORT_TO_NP = {"tensor(float)": np.float32, "tensor(float16)": np.float16}
+
 # Flash/head-path node-name fragments, for the profiler's head rollup (best-effort).
 HEAD_NODE_HINTS = ("lm_head", "fh", "flash", "scatter", "gather", "argmax", "topk")
 
@@ -59,15 +62,18 @@ class Decoder:
     buffer bound to both sides is the supported pattern and sidesteps that. Auto-enabled for
     pure-KV transformers; hybrids with fixed conv/SSM state fall back to the numpy path.
 
-    Shared-KV limit (see docs/IDEAS.md, the KV-cache section): the buffer is FIXED-length (`max_kv`, default =
-    this request's prompt+max_new). It is also the memory ceiling (~224 KB/token on Qwen3-0.6B).
-    A generation that would exceed it is clamped and STOPS EARLY -- we do not drop old tokens.
-    We must not write past the buffer: GQA writes each k/v in place at offset=past_seq_len, so an
-    over-long write lands outside the arena (OOB -> segfault/corruption), not a realloc. To go
-    past the cap you need sliding-window eviction, which is NOT cheap here: GQA ties RoPE-position,
-    write-offset and seqlens to one value, so a ring buffer is impossible -- you must left-shift
-    the cache (a copy) AND re-rotate every surviving key into the compacted position frame (exact
-    per-model RoPE; lossy, no longer byte-identical). ~40-80 lines; build only for real long-chat.
+    Fixed-cap sliding window (see docs/IDEAS.md, the KV-cache section): `max_kv` fixes the buffer
+    length, which is also the memory ceiling (~224 KB/token on Qwen3-0.6B). When generation fills it,
+    `generate` SLIDES: it drops the oldest tokens and re-prefills the most-recent window
+    (`_slide_keep`) into the same buffer at positions 0.. The model recomputes K/V for the retained
+    tokens, so their context is exact — we never hand-rotate cached keys, so there is no per-model
+    RoPE to special-case (GQA bakes position into the stored keys, which is why a ring buffer or an
+    in-place shift can't work here). One window-length prefill per slide, amortized keep/(cap-keep)
+    prefill-tokens per generated token. We never write past the buffer: a slide re-prefills from
+    offset 0, normal steps append at clen<cap, so GQA's in-place write (offset=past_seq_len) always
+    lands inside the arena. A sliding window forgets — dropped tokens leave the context; raise max_kv
+    to retain more. Default max_kv = this request's prompt+max_new, so by default nothing slides and
+    the output is byte-identical to a full-context run.
     """
 
     def __init__(self, model_dir, threads=1, profile=False, share_kv=True, max_kv=None):
@@ -151,10 +157,19 @@ class Decoder:
                           else next(n for n in self.out_names if not n.startswith("present.")))
 
     @staticmethod
+    def _slide_keep(cap):
+        """Most-recent tokens retained when the fixed shared-KV buffer fills (drop the oldest,
+        re-prefill these). Leaves cap-keep free decode slots before the next slide, so amortized
+        re-prefill cost is keep/(cap-keep) prefill-tokens per generated token. 3/4 = gentle
+        forgetting; the invariant 1 <= keep <= cap-1 (for cap>=2) guarantees a free slot after a
+        slide (no infinite slide) and an in-bounds write (no OOB)."""
+        return max(1, cap * 3 // 4)
+
+    @staticmethod
     def _zero_state(inp):
         """Zero seed for a state input from its declared shape: dim 0 (batch) -> 1, any other
         symbolic dim -> 0 (KV seq dim, grows); concrete dims kept (recurrent/conv state, full size)."""
-        dt = {"tensor(float)": np.float32, "tensor(float16)": np.float16}.get(inp.type, np.float32)
+        dt = ORT_TO_NP.get(inp.type, np.float32)
         shape = [d if isinstance(d, int) else (1 if i == 0 else 0) for i, d in enumerate(inp.shape)]
         return np.zeros(shape, dt)
 
@@ -187,7 +202,7 @@ class Decoder:
         for i in self.sess.get_inputs():
             if i.name not in self.present_for:
                 continue
-            dt = {"tensor(float)": np.float32, "tensor(float16)": np.float16}.get(i.type, np.float32)
+            dt = ORT_TO_NP.get(i.type, np.float32)
             shape = [1 if j == 0 else (d if isinstance(d, int) else max_len)
                      for j, d in enumerate(i.shape)]
             self._bufs[i.name] = ort.OrtValue.ortvalue_from_numpy(np.zeros(shape, dt))
@@ -246,34 +261,45 @@ class Decoder:
 
     def generate(self, prompt_ids, max_new, temperature=0.0, seed=None):
         """Returns (generated_ids, decode_tok_per_s). Decode timer excludes prefill.
-        temperature=0 = greedy argmax; >0 = sample over the probed candidate set."""
+        temperature=0 = greedy argmax; >0 = sample over the probed candidate set.
+
+        With a fixed max_kv the shared buffer slides once full (drop-oldest + re-prefill the recent
+        window — see the class docstring); otherwise the cache grows to fit the whole request."""
         rng = np.random.default_rng(seed)
         ids = list(prompt_ids)
         n0 = len(ids)
+        cap = None
         if self.share_kv:
-            need = n0 + max_new + 1
-            cap = self.max_kv or need
+            cap = self.max_kv or n0 + max_new + 1
             if n0 >= cap:
                 raise ValueError(f"prompt ({n0}) exceeds shared-KV cap ({cap}); raise max_kv")
-            # ponytail: at the cap we clamp and stop early, NOT drop-oldest. Sliding-window eviction
-            # needs cache shift + per-model RoPE re-rotation (GQA ties pos==write-offset==seqlen);
-            # ~40-80 lossy lines -- see class docstring / docs/IDEAS.md. Add for real long-chat.
-            max_new = min(max_new, cap - n0 - 1)   # clamp so GQA never writes past the buffer
             self._setup_shared(cap)
 
-        def step(toks, start, past):           # numpy path threads past in/out; shared path ignores it
-            if self.share_kv:
-                return None, self._step_shared(toks, len(ids), start)
-            return self._step(toks, np.ones((1, len(ids)), np.int64), past, start)
+        past = self._empty_past()   # numpy path only; the shared path tracks clen instead
+        clen = 0                    # tokens currently in the shared buffer (= compacted positions)
 
-        past = self._empty_past()
-        past, od = step(np.array([ids], np.int64), 0, past)
+        def step(toks):
+            nonlocal past, clen
+            k = toks.shape[1]
+            if not self.share_kv:   # numpy: grow the cache, feed present->past each step
+                past, od = self._step(toks, np.ones((1, len(ids)), np.int64), past, len(ids) - k)
+                return od
+            if clen + k > cap:      # buffer full -> slide: re-prefill the recent window at pos 0
+                keep = self._slide_keep(cap)        # ids[-keep:] ends with the current token(s)
+                od = self._step_shared(np.array([ids[-keep:]], np.int64), keep, 0)
+                clen = keep
+                return od
+            od = self._step_shared(toks, clen + k, clen)   # append k tokens at slot=clen
+            clen += k
+            return od
+
+        od = step(np.array([ids], np.int64))
         nxt = self._select(od, temperature, rng)
         ids.append(nxt)
         t1 = time.perf_counter()
         gen = 1
         while nxt not in self.eos and gen < max_new:
-            past, od = step(np.array([[nxt]], np.int64), len(ids) - 1, past)
+            od = step(np.array([[nxt]], np.int64))
             nxt = self._select(od, temperature, rng)
             ids.append(nxt)
             gen += 1
@@ -329,7 +355,8 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--no-share-kv", action="store_true", help="disable in-place buffer-shared KV")
     ap.add_argument("--max-kv", type=int, default=None,
-                    help="fixed shared-KV buffer length, e.g. 2048 (default: size to each request)")
+                    help="fixed shared-KV buffer length & memory cap, e.g. 2048; generation slides "
+                         "(drop-oldest + re-prefill) once full (default: size to each request, no slide)")
     a = ap.parse_args()
 
     dec = Decoder(a.model_dir, a.threads, a.profile, share_kv=not a.no_share_kv, max_kv=a.max_kv)

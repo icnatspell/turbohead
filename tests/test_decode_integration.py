@@ -75,3 +75,41 @@ def test_sampling_seed_reproducible(dec):
     a, _ = dec.generate(ids, max_new=8, temperature=0.8, seed=1)
     b, _ = dec.generate(ids, max_new=8, temperature=0.8, seed=1)
     assert a == b
+
+
+# --- shared-KV sliding window (fixed max_kv): generate past the cap by dropping old context ---
+def test_reprefill_resets_shared_cache(dec):
+    """The eviction mechanism: re-prefilling a short window B into a buffer that held longer text A
+    must give byte-identical head output to a FRESH prefill of B — proving the slide overwrites
+    from slot 0 and the stale A slots beyond B are masked out (no leakage, no per-model RoPE)."""
+    a = dec.tok("The quick brown fox jumps over the lazy dog near the wide river bank.")["input_ids"]
+    b = dec.tok("A short sentence.")["input_ids"]
+    cap = len(a) + 4
+    d1 = Decoder(MODEL, threads=1, max_kv=cap)
+    d1._setup_shared(cap)
+    d1._step_shared(np.array([a], np.int64), len(a), 0)         # fill buffer with A
+    re = d1._step_shared(np.array([b], np.int64), len(b), 0)    # slide: re-prefill B over A
+    d2 = Decoder(MODEL, threads=1, max_kv=cap)
+    d2._setup_shared(cap)
+    fresh = d2._step_shared(np.array([b], np.int64), len(b), 0)
+    for k in re:
+        assert np.array_equal(re[k], fresh[k]), k
+
+
+def test_sliding_window_generates_past_cap(dec):
+    """A fixed max_kv smaller than prompt+max_new must keep generating (slide), not stop early."""
+    ids = dec.tok("Once upon a time, in a small village, there lived")["input_ids"]
+    cap = len(ids) + 8                                          # only 8 spare decode slots
+    out, tps = Decoder(MODEL, threads=1, max_kv=cap).generate(ids, max_new=40)
+    assert len(out) > cap - len(ids) and tps > 0               # went past the buffer's spare room
+
+
+def test_sliding_prefix_matches_full_context(dec):
+    """Until the buffer first fills, the sliding decoder still holds the whole context, so its
+    greedy output is identical to a full-context run; they diverge only once eviction starts."""
+    ids = dec.tok("Once upon a time, in a small village,")["input_ids"]
+    cap = len(ids) + 8
+    full = dec.generate(ids, max_new=40)[0]                     # dec: no max_kv -> never slides
+    slid = Decoder(MODEL, threads=1, max_kv=cap).generate(ids, max_new=40)[0]
+    pre = cap - len(ids)                                        # tokens emitted before the first slide
+    assert slid[:pre] == full[:pre]

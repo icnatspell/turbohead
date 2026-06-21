@@ -81,3 +81,28 @@ def test_tokenout_rejects_temperature():
     d = _dec("token-out", token_out="next_token")
     with pytest.raises(ValueError):
         d._select({"next_token": np.array([[5]])}, 0.8, np.random.default_rng(0))
+
+
+# --- shared-KV sliding window: bookkeeping only, no model ---
+@pytest.mark.parametrize("cap", [2, 3, 4, 8, 16, 128, 2048])
+def test_slide_keep_leaves_headroom(cap):
+    """The retained-window size must leave >=1 free slot after a slide (else infinite slide / OOB)
+    and keep a useful chunk of recent context."""
+    keep = Decoder._slide_keep(cap)
+    assert 1 <= keep <= cap - 1            # in-bounds write + room for the next token
+    if cap >= 8:
+        assert keep >= cap // 2            # retains a useful recent window
+
+
+def test_sliding_schedule_never_writes_past_buffer():
+    """Simulate generate's shared-KV write schedule (the OOB-critical part): prefill n0, then
+    single-token steps into a cap buffer that slides at overflow. The in-buffer length must never
+    exceed cap (an over-cap write is an out-of-bounds segfault) and must slide at least once."""
+    cap, n0 = 16, 5
+    clen, lens = n0, [n0]
+    for _ in range(100):
+        clen = clen + 1 if clen + 1 <= cap else Decoder._slide_keep(cap)
+        lens.append(clen)
+    assert max(lens) <= cap                                  # no write past the buffer
+    assert min(lens) >= 1
+    assert any(b < a for a, b in zip(lens, lens[1:]))        # slid at least once
