@@ -1,10 +1,11 @@
 # multiple_assignment
 
-**Status: WIN — real balanced r=2 build done (`build_r2.py`, 2026-06-21). +1.25pp agree@256 (96.75 ->
-98.00) at SPEED-NEUTRAL cost once stage 2 is int8 (`fused_r2_q8`, 1.01x vs shipped). The old "~25%
-decode" was r=2-on-fp32; int8 halves the gather bytes and dissolves it. Ready to graduate into
-`build_clusters.py --r 2`; one open item: dedup a token that lands in two probed clusters (harmless for
-greedy, double-weights it for sampling). See LOG.md 2026-06-21.**
+**Status: GRADUATED (2026-06-21) — shipped as `turbohead-build-clusters --r 2` + sampling dedup in
+`decode_loop._pick`. +1.25pp agree@256 (96.75 -> 98.00) at ~1% end-to-end TPS cost vs the deployed
+fp32 head once stage 2 is int8 (`turbohead-splice --head-weight-dtype int8`). The old "~25% decode" was
+r=2-on-fp32; int8 halves the gather bytes (8.4 vs 16.8 MB/token) and dissolves it. r=2-int8 vs int8 r=1
+is ~1-3% across threads. This folder is the evidence + the int8-vs-fp32 agreement A/B (`build_r2.py`).
+See LOG.md 2026-06-21.**
 
 ## Objective
 

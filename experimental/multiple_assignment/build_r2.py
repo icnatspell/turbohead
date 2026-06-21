@@ -1,5 +1,10 @@
 r"""Real balanced r=2 build + agreement check (the graduation step for multiple_assignment).
 
+GRADUATED (2026-06-21): this is now in core as `turbohead-build-clusters --r 2` (balanced 2nd home via
+build_clusters.balanced_assign(forbid=...), table built by build()). Sampling dedup lives in
+decode_loop._pick. Kept here as the standalone evidence + the int8-vs-fp32 agreement A/B; the core
+command re-clusters from scratch, this script reuses the shipped clusters.npz primary.
+
 The PoC (multiple_assignment_poc.py) measured the recall CEILING with each token's true 2nd-nearest
 centroid (unbalanced — some clusters get many seconds, some none). The fused op needs a FIXED-width
 table: it reads cap from Wperm.Shape()[1] and loops cap rows per probed cluster. So the real build

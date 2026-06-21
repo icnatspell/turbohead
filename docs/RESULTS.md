@@ -687,3 +687,11 @@ Open items, roughly in priority order:
    raising `P` to 384–512 is nearly-free accuracy; only extreme head share has a real tradeoff). The
    `cap` axis (re-cluster per value; trades stage-1 `K=V/cap` vs stage-2 `P·cap`) is still unexplored —
    worth a sweep on the 2–3 highest-head-share models if pursuing further.
+5. **Multiple-assignment (`--r 2`) — shipped (2026-06-21).** `turbohead-build-clusters --r 2` gives each
+   token a balanced 2nd home cluster (table grows `cap→2·cap`, stage-1 gemv/`K` unchanged), catching the
+   recall tail. On Qwen3-0.6B it lifts top-1 agreement **+2.0pp @256 (96.75→98.78)**; with int8 stage-2
+   (`turbohead-splice --head-weight-dtype int8`) **+1.25pp (→98.00)** at **~1% end-to-end TPS** vs the
+   deployed fp32 head (0.99×@1t and @4t; int8 halves the doubled gather, so the old fp32 "~25%" estimate
+   collapses to noise — r=2-int8 vs int8-r=1 is ~1–3%). Keeps the **sharp** centroids (rebuilding over
+   doubled members blurs them and loses). Sampling dedups the twice-listed tail token in `decode_loop`.
+   Per-model like `--eta`: sweep agreement before adopting. See `experimental/multiple_assignment/`.

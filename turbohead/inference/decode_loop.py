@@ -217,6 +217,11 @@ class Decoder:
         """Greedy (argmax) or temperature sampling over a candidate (logits, ids) shortlist."""
         if not temperature:
             return int(ids[logits.argmax()])
+        # r>=2 multiple-assignment scores a token twice when it sits in two probed clusters; the two
+        # logits are identical (same weight row), so collapse to unique ids before softmax — else
+        # sampling double-weights it. Greedy (argmax above) needs no dedup: the same id wins anyway.
+        ids, first = np.unique(ids, return_index=True)
+        logits = logits[first]
         x = logits.astype(np.float32) / temperature
         x -= x.max()
         p = np.exp(x)

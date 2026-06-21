@@ -59,6 +59,18 @@ def test_shortlist_sampling_within_shortlist():
     assert picks <= set(pairs)
 
 
+def test_shortlist_sampling_dedups_duplicate_ids():
+    """multiple-assignment (--r 2) can list a token twice (it sat in two probed clusters) with equal
+    logits. Sampling must weight it ONCE, not by its multiplicity. Here id 3 appears twice and id 7
+    once, all equal logit -> each should win ~1/2; without dedup id 3 would win ~2/3."""
+    od = {"cand_logits": np.zeros((1, 3), np.float32),
+          "cand_ids": np.array([[3, 3, 7]], np.int64)}
+    rng = np.random.default_rng(0)
+    picks = np.array([_dec("shortlist-out")._select(od, 1.0, rng) for _ in range(4000)])
+    frac3 = (picks == 3).mean()
+    assert 0.45 < frac3 < 0.55, frac3   # ~0.5 deduped; ~0.667 if the duplicate is double-counted
+
+
 # --- token-out: the id directly, greedy only ---
 def test_tokenout_greedy_returns_token_id():
     d = _dec("token-out", token_out="next_token")

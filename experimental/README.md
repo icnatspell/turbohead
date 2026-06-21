@@ -14,12 +14,13 @@ what shipped and what got parked. **Nothing in `turbohead/` or `csrc/` depends o
 - **Promotion.** When an experiment proves out, lift its override into the corresponding core module
   (and delete or annotate the experiment). That is how `buffershare/` and `recall_lift/` graduated.
   `anisotropic_clustering/` graduated as an opt-in `--eta` knob (not a default — see its row below).
+  `multiple_assignment/` graduated as `build-clusters --r 2` + a sampling dedup in `decode_loop`.
 
 ## Index
 
 | folder | what it explored | verdict |
 |---|---|---|
-| `multiple_assignment/` | give each token its top-r home clusters (overlapping IVF) so the tail is reachable | **win, ready to graduate** — real balanced r=2 build = +1.25pp agree@256, SPEED-NEUTRAL on int8 stage 2 (the "~25%" was fp32-only; int8 dissolves it). Open: dedup for sampling |
+| `multiple_assignment/` | give each token its top-r home clusters (overlapping IVF) so the tail is reachable | **GRADUATED** — `build-clusters --r 2` + sampling dedup; +1.25pp agree@256 at ~1% end-to-end TPS on int8 (the "~25%" was fp32-only; int8 dissolves it) |
 | `targeted_second_home/` | second home only for the heavy-miss tokens — bake-off vs shipped always-score | parked — dominated; captures 84% of always-score's lift but always-score is already ~free and scores higher |
 | `anisotropic_clustering/` | ScaNN-style MIPS-aware partition (penalise parallel quantization error) | **shipped as opt-in** — `build_clusters.py --eta` (default 1.0); PER-MODEL: eta=4 helps Qwen3-0.6B, regresses gemma3-270m |
 | `whitened_routing/` | learned Mahalanobis routing metric folded into the centroids | parked — whitening hurts; LLM anisotropy is signal, not noise |
@@ -65,7 +66,7 @@ there. A few experiments sit off the head entirely.
 |---|---|---|
 | [`recall_lift/`](recall_lift/) (lever 4) | always-score the chronically-missed tokens, bypassing routing | **shipped** — `turbohead-calibrate-misses`; +1.3pp agree@256 at ~free cost |
 | [`targeted_second_home/`](targeted_second_home/) | second home for the same heavy-miss tokens — reachable via a 2nd route, not scored every step | parked — dominated by always-score (84% of the lift, but always-score is already ~free and scores higher) |
-| [`multiple_assignment/`](multiple_assignment/) | give each token its top-r home clusters (overlapping IVF) | **win, graduation-ready** — real balanced r=2 = +1.25pp agree@256, speed-neutral on int8 stage 2 (fp32-only "~25%" dissolved). Open: sampling dedup |
+| [`multiple_assignment/`](multiple_assignment/) | give each token its top-r home clusters (overlapping IVF) | **GRADUATED** — `build-clusters --r 2` + sampling dedup; +1.25pp agree@256 at ~1% end-to-end TPS on int8 (fp32-only "~25%" dissolved) |
 
 ### Stage-1 speed — lower the routing floor (cheaper/coarser router to afford a bigger P)
 
