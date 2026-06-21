@@ -142,8 +142,18 @@ matters (top-1). Parked.
 | mean-centered cosine (subtract the train-mean `h̄`) | 74.4% | the "common-mode" direction the hidden states share is *highly* discriminative for routing here, not removable noise — deleting it destroys the signal |
 | diagonal-whitened cosine (scale dims by `1/std(h)`) | 77.3% | same: the anisotropy-removal trick from embedding-similarity work does not transfer, because the centroids live in the same anisotropic space and rely on that structure |
 
-Conclusion across both POCs: **cosine-on-the-embedding-mean is at the ceiling for a single free
-linear routing pass.** Stop hunting for a better routing *matrix*; the remaining wins are elsewhere.
+A later POC closed the one remaining gap: those swaps were all *fixed/unsupervised*, so
+`experimental/learned_metric/learned_metric_poc.py` **trained** a general linear routing map `L (D×D)`
+by gradient descent on the recall objective (ScaNN-style score-aware loss applied to the query metric,
+the steelman of whitened_routing) and folded it into the centroids. It improves the median rank (4→2)
+but **triples p99 (842→2644)**, losing ~4pp at every `P`: the discriminative metric wins the frequent
+clusters and distorts the idiosyncratic tail, where top-1 actually lives. Low-rank and
+identity-shrinkage lose the same way, so it is not overparameterization.
+
+Conclusion across all three POCs: **cosine-on-the-embedding-mean is at the ceiling for any single
+linear routing pass, learned or fixed.** Stop hunting for a better routing *matrix*; the remaining
+wins keep routing exact and reshape the partition (`anisotropic_clustering`, `multiple_assignment`) or
+sidestep routing (`always-score`).
 
 ## Improves fidelity, not speed
 

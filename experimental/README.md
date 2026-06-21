@@ -58,6 +58,7 @@ there. A few experiments sit off the head entirely.
 | folder | idea | verdict |
 |---|---|---|
 | [`mips_routing/`](mips_routing/) | rank by inner product / norm-bound instead of cosine | parked — cosine already wins |
+| [`learned_metric/`](learned_metric/) | *discriminatively*-train the routing metric on the recall objective (ScaNN-style, the steelman of whitened) | parked — improves the median, wrecks the tail; closes the routing-matrix line |
 | [`recall_lift/`](recall_lift/) (levers 2–3) | exact-stop certificate; margin-gated cascade re-probe | parked — exact-stop degenerates to full vocab; cascade ≈ break-even with raising P |
 
 ### Stage-1 recall — add reachability (catch the heavy miss tail)
