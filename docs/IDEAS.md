@@ -254,6 +254,15 @@ in. Routing can't fix a bad assignment; always-scoring sidesteps routing for tha
 It **stacks** with simply raising `P` (`P=256→512` independently buys 97.5%→98.3%), so
 `always-score + P=512` reaches the ~99% region at modest cost.
 
+**Frontier follow-up** (`experimental/recall_lift/frontier_poc.py`, 2026-06-21): the always-score lift
+*grows* as `P` shrinks (+0.6pp @512 → +5.3pp @32), and `N=64` @ `P=192` already matches the `P=256`
+no-list baseline. Tempting as a TPS-saving P cut, but the real decode bench says no on the deployed
+**fused** backend: P=256→128 moves it ~2% (within noise) because the head is dominated by the
+P-independent stage-1 int4 gemv, not the cheap `P·cap` stage-2 gather (P=256→128 buys ~10% on the
+slower **onnx** backend, where the gather is a real share). So always-score's payoff on the fast path
+is **more recall at the current P**, not a lower-P speedup. Lever for fused TPS stays the stage-1
+gemv / body, not P. (See `experimental/recall_lift/LOG.md`.)
+
 How to build/use it (this is what shipped):
 
 - **Calibrate** (offline, needs the HF model): `turbohead-calibrate-misses --model <hf> --npz
@@ -345,7 +354,8 @@ cost. Park behind shipping #6 broadly.
 ## Suggested order
 
 1. Raise `P` if more agreement is wanted (the only reliable knob on the idiosyncratic tail);
-   stacks with #8. `P=256→512` buys 97.5%→98.3% at ~+7% decode latency.
+   stacks with #8. `P=256→512` buys 97.5%→98.3%; the latency cost is backend-dependent — real on the
+   onnx backend, ~free on the deployed fused backend (P is not its bottleneck, see §8 frontier note).
 
 Done, positive: always-score frequent misses (#8), shipped — `turbohead-calibrate-misses` +
 `turbohead-splice --always-score`, +1.3pp agreement (97.5%→98.8%) at ~free cost, on/off via the flag.
