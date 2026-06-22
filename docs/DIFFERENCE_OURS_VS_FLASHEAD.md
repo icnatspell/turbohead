@@ -6,7 +6,7 @@ runs each iteration faster than a CPU, so the gap is not hardware. We do less wo
 make different algorithm choices. This doc records what differs, why we are still fast, what
 it costs in quality, and which knobs raise top-1 agreement.
 
-Written for a junior engineer. Read `turbohead/surgery/build_clusters.py` alongside it.
+Written for a junior engineer. Read `src/turbohead/surgery/build_clusters.py` alongside it.
 
 ## The headline: iteration budget
 
@@ -67,7 +67,7 @@ reassignment over a 128k vocabulary, up to 1000 times, is the kind of step that 
 We minimize squared Euclidean distance:
 
 ```
-argmin ||x - c||^2  ==  argmax (x·c - 0.5||c||^2)   # build_clusters.py:19
+argmin ||x - c||^2  ==  argmax (x·c - 0.5||c||^2)   # build_clusters.py assign_scores()
 ```
 
 and normalize only the final centroids, once, for routing (`build()`, line 123). The paper

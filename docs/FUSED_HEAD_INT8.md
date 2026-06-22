@@ -146,7 +146,7 @@ adds the flag:
 ```bash
 R=artifacts/qwen3_0_6b
 # 1. int4 baseline ONNX (genai model builder)
-MODEL=Qwen/Qwen3-0.6B OUT=$R/baseline bash turbohead/surgery/convert_baseline.sh
+MODEL=Qwen/Qwen3-0.6B OUT=$R/baseline bash src/turbohead/surgery/convert_baseline.sh
 # 2. dump the fp32 head weight (= tied embedding)
 uv run turbohead-extract-head   --model Qwen/Qwen3-0.6B --out $R/head_W.npy
 # 3. balanced k-means clustering assets (cap=16 -> K = V/cap clusters)
@@ -187,8 +187,8 @@ or copy the `fused_q8/model.onnx*` files across (about 554 MB).
 
 - `csrc/turbohead_op.cc` adds the `FlashHeadSelectQ8` op next to the fp32 `FlashHeadSelect`.
   `csrc/build.sh` compiles this file into the `.so`.
-- `turbohead/surgery/build_subgraph.py`: `fused_stage2_nodes` takes a `weight_dtype`
+- `src/turbohead/surgery/build_subgraph.py`: `fused_stage2_nodes` takes a `weight_dtype`
   argument that writes the int8 node and quantized weights.
-- `turbohead/surgery/splice.py` exposes it as `--head-weight-dtype {fp32,int8}`.
+- `src/turbohead/surgery/splice.py` exposes it as `--head-weight-dtype {fp32,int8}`.
 
 `csrc/build.sh` needs no change. It already compiles `turbohead_op.cc`.

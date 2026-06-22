@@ -5,7 +5,7 @@ One section per model; add new models by appending a section in the same shape.
 
 ## Summary — all models
 
-Fused FlashHead (contract H) decode speedup **vs the fp32-equivalent dense head** (`head16`), single
+Fused FlashHead (shortlist-out) decode speedup **vs the fp32-equivalent dense head** (`head16`), single
 thread, int4 body. Sorted by greedy speedup. The win tracks the head's share of a decode step: narrow
 hidden `D` + large vocab `V` + few layers ⇒ the head dominates ⇒ bigger speedup.
 
@@ -65,7 +65,7 @@ baseline → head weight → clusters → 4 dense-head variants → 2 flash spli
 bench/eval commands:
 
 ```bash
-bash turbohead/surgery/build_all.sh <hf-model> <slug> [cap=16] [P=256]
+bash src/turbohead/surgery/build_all.sh <hf-model> <slug> [cap=16] [P=256]
 ```
 
 `<slug>` is a dir-safe name; everything for the model lives under `artifacts/<slug>/`:
@@ -87,7 +87,7 @@ unless `FORCE=1`. Per-model command blocks are listed in each section.
   base-model quality make absolute PPL incomparable — LFM2.5's ~281 is genuine, verified `H·Wᵀ` ==
   the model's own logits); **top-1 agreement is the cross-model-comparable metric.**
 - **Heads compared:** `head{16,8,4}` dense at MatMulNBits group size g (`turbohead-quantize-head`);
-  `flash onnx` (contract A, portable (1,V) logits); `flash fused` (contract H, custom op). Body is
+  `flash onnx` (logits-out, portable (1,V) logits); `flash fused` (shortlist-out, custom op). Body is
   int4 g128 for all rows; only the head varies.
 - **Environment:** CPU only (CPUExecutionProvider), Linux WSL2, 8 logical cores. Single-threaded is
   the intended deploy point; >4 threads oversubscribe here.
@@ -99,7 +99,7 @@ unless `FORCE=1`. Per-model command blocks are listed in each section.
 V=151936, D=1024, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 13.046.
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b
 R=artifacts/qwen3_0_6b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -116,8 +116,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | **98.5%** | 13.066 |
 | head4 g128 | 90.2% | 13.302 |
 | head4 g32 | 93.0% | 13.076 |
-| flash onnx (A) | 96.8% | 144.786 † |
-| flash fused (H) | 96.8% | 144.786 † |
+| flash onnx | 96.8% | 144.786 † |
+| flash fused | 96.8% | 144.786 † |
 
 † Flash full-distribution PPL is **coverage-limited**: at P=256 only **87.9%** of targets fall in the
 probed candidate set; uncovered targets are floored to ε, inflating PPL. The *covered* PPL (ranking
@@ -133,8 +133,8 @@ but weak for full-vocab likelihood — raise P, or use a dense head, if you need
 | head8 g128 | 38.7±0.4 (1.75×) | 53.5±1.9 (1.67×) | 61.9±0.7 (1.78×) | 60.4±2.1 (1.75×) |
 | head4 g128 | 45.2±0.6 (2.05×) | 64.6±1.7 (2.02×) | 73.5±1.1 (2.11×) | 72.5±1.1 (2.10×) |
 | head4 g32 | 42.4±0.6 (1.92×) | 61.2±1.2 (1.91×) | 69.4±1.0 (1.99×) | 69.0±1.0 (2.00×) |
-| flash onnx (A) | 47.8±0.4 (2.17×) | 67.2±2.6 (2.10×) | 75.3±3.0 (2.16×) | 75.9±0.8 (2.20×) |
-| **flash fused (H)** | **53.1±1.1 (2.40×)** | **74.2±1.5 (2.32×)** | **82.4±1.6 (2.37×)** | **81.7±1.6 (2.37×)** |
+| flash onnx | 47.8±0.4 (2.17×) | 67.2±2.6 (2.10×) | 75.3±3.0 (2.16×) | 75.9±0.8 (2.20×) |
+| **flash fused** | **53.1±1.1 (2.40×)** | **74.2±1.5 (2.32×)** | **82.4±1.6 (2.37×)** | **81.7±1.6 (2.37×)** |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -144,12 +144,12 @@ but weak for full-vocab likelihood — raise P, or use a dense head, if you need
 | head8 g128 | 36.0±1.0 (1.69×) | 51.4±1.4 (1.64×) | 57.5±0.8 (1.71×) | 56.6±0.8 (1.69×) |
 | head4 g128 | 41.3±0.6 (1.94×) | 57.5±1.0 (1.83×) | 65.6±3.1 (1.95×) | 64.0±1.3 (1.91×) |
 | head4 g32 | 39.7±0.6 (1.86×) | 54.4±0.6 (1.73×) | 61.3±1.0 (1.82×) | 60.6±0.7 (1.80×) |
-| flash onnx (A) | 46.8±0.6 (2.19×) | 66.3±1.2 (2.11×) | 75.6±1.4 (2.25×) | 73.9±0.5 (2.20×) |
-| **flash fused (H)** | **52.2±0.7 (2.45×)** | **73.2±1.6 (2.33×)** | **77.6±2.3 (2.31×)** | **81.1±1.9 (2.42×)** |
+| flash onnx | 46.8±0.6 (2.19×) | 66.3±1.2 (2.11×) | 75.6±1.4 (2.25×) | 73.9±0.5 (2.20×) |
+| **flash fused** | **52.2±0.7 (2.45×)** | **73.2±1.6 (2.33×)** | **77.6±2.3 (2.31×)** | **81.1±1.9 (2.42×)** |
 
 ### Takeaways
 
-- **Fused contract-H is the fastest path at every thread count** (2.40× greedy / 2.45× sampling @1t),
+- **Fused shortlist-out is the fastest path at every thread count** (2.40× greedy / 2.45× sampling @1t),
   beating *every* dense quant head — including int4 — on both speed and greedy agreement.
 - **head8 g128 is the dense quality sweet spot**: 98.5% agreement, PPL identical to fp32, 1.75×.
 - Among int4 dense heads, **g128 is faster but g32 is more accurate** (smaller group = more scales =
@@ -167,7 +167,7 @@ build_all auto-falls back). Tiny D + huge V + few layers ⇒ the head dominates 
 edge is far larger than on Qwen3-0.6B.
 
 ```bash
-bash turbohead/surgery/build_all.sh google/gemma-3-270m gemma3_270m
+bash src/turbohead/surgery/build_all.sh google/gemma-3-270m gemma3_270m
 R=artifacts/gemma3_270m
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -197,8 +197,8 @@ full-vocab likelihood).
 | head8 g128 | 71.5±0.6 (2.40×) | 98.6±4.1 (2.32×) | 110.1±2.5 (2.47×) | 101.3±8.6 (2.22×) |
 | head4 g128 | 94.7±1.7 (3.18×) | 127.5±5.8 (3.00×) | 144.2±3.6 (3.23×) | 142.4±3.9 (3.13×) |
 | head4 g32 | 84.4±1.6 (2.83×) | 109.3±3.6 (2.58×) | 128.2±1.7 (2.87×) | 126.3±2.6 (2.77×) |
-| flash onnx (A) | 127.0±3.8 (4.26×) | 166.2±8.3 (3.91×) | 182.5±11.7 (4.09×) | 178.6±10.7 (3.92×) |
-| **flash fused (H)** | **160.1±2.9 (5.37×)** | **189.5±4.7 (4.47×)** | **207.5±5.1 (4.65×)** | **207.8±2.1 (4.56×)** |
+| flash onnx | 127.0±3.8 (4.26×) | 166.2±8.3 (3.91×) | 182.5±11.7 (4.09×) | 178.6±10.7 (3.92×) |
+| **flash fused** | **160.1±2.9 (5.37×)** | **189.5±4.7 (4.47×)** | **207.5±5.1 (4.65×)** | **207.8±2.1 (4.56×)** |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -208,8 +208,8 @@ full-vocab likelihood).
 | head8 g128 | 57.9±0.7 (2.24×) | 74.8±1.7 (2.04×) | 83.1±1.8 (2.09×) | 77.2±5.6 (1.94×) |
 | head4 g128 | 70.6±1.3 (2.73×) | 89.2±4.0 (2.43×) | 99.6±1.7 (2.50×) | 97.4±1.1 (2.45×) |
 | head4 g32 | 65.1±0.9 (2.52×) | 73.4±3.3 (2.00×) | 92.5±1.5 (2.33×) | 91.3±2.0 (2.29×) |
-| flash onnx (A) | 126.1±4.0 (4.88×) | 158.5±7.9 (4.31×) | 183.0±10.5 (4.60×) | 173.8±4.2 (4.37×) |
-| **flash fused (H)** | **157.2±4.5 (6.08×)** | **189.8±8.5 (5.17×)** | **215.6±9.5 (5.42×)** | **206.9±9.6 (5.20×)** |
+| flash onnx | 126.1±4.0 (4.88×) | 158.5±7.9 (4.31×) | 183.0±10.5 (4.60×) | 173.8±4.2 (4.37×) |
+| **flash fused** | **157.2±4.5 (6.08×)** | **189.8±8.5 (5.17×)** | **215.6±9.5 (5.42×)** | **206.9±9.6 (5.20×)** |
 
 ### Takeaways
 
@@ -229,7 +229,7 @@ Int4 body = RTN (k_quant_last reshape-crashes; auto-fallback). Same 262k vocab a
 hidden + more layers, so the head is a smaller share than 270M → smaller (but still large) flash win.
 
 ```bash
-bash turbohead/surgery/build_all.sh google/gemma-3-1b-pt gemma3_1b
+bash src/turbohead/surgery/build_all.sh google/gemma-3-1b-pt gemma3_1b
 R=artifacts/gemma3_1b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -258,8 +258,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 23.4±0.7 (1.91×) | 35.9±0.6 (1.92×) | 42.0±0.6 (2.01×) | 41.2±0.9 (1.96×) |
 | head4 g128 | 29.7±0.4 (2.42×) | 43.2±1.1 (2.31×) | 49.7±1.5 (2.38×) | 47.5±2.6 (2.26×) |
 | head4 g32 | 27.6±0.3 (2.25×) | 39.1±1.6 (2.09×) | 44.0±1.7 (2.11×) | 46.3±1.1 (2.20×) |
-| flash onnx (A) | 34.3±0.4 (2.79×) | 48.9±0.8 (2.61×) | 57.5±2.1 (2.75×) | 57.1±1.4 (2.71×) |
-| **flash fused (H)** | **37.3±0.2 (3.04×)** | **50.8±1.2 (2.71×)** | **61.8±2.0 (2.96×)** | **61.8±2.6 (2.94×)** |
+| flash onnx | 34.3±0.4 (2.79×) | 48.9±0.8 (2.61×) | 57.5±2.1 (2.75×) | 57.1±1.4 (2.71×) |
+| **flash fused** | **37.3±0.2 (3.04×)** | **50.8±1.2 (2.71×)** | **61.8±2.0 (2.96×)** | **61.8±2.6 (2.94×)** |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -269,8 +269,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 22.5±0.4 (1.95×) | 30.0±1.4 (1.72×) | 36.7±0.5 (1.87×) | 34.9±2.0 (1.76×) |
 | head4 g128 | 25.9±0.6 (2.24×) | 36.0±1.5 (2.07×) | 40.9±1.8 (2.08×) | 42.2±1.5 (2.13×) |
 | head4 g32 | 22.1±1.1 (1.91×) | 34.0±1.2 (1.95×) | 38.3±0.8 (1.95×) | 37.9±0.9 (1.91×) |
-| flash onnx (A) | 31.8±0.9 (2.75×) | 47.2±2.4 (2.71×) | 54.2±2.0 (2.76×) | 53.1±2.3 (2.68×) |
-| **flash fused (H)** | **35.6±1.0 (3.08×)** | **48.4±2.2 (2.77×)** | **57.5±3.2 (2.93×)** | **56.5±1.7 (2.85×)** |
+| flash onnx | 31.8±0.9 (2.75×) | 47.2±2.4 (2.71×) | 54.2±2.0 (2.76×) | 53.1±2.3 (2.68×) |
+| **flash fused** | **35.6±1.0 (3.08×)** | **48.4±2.2 (2.77×)** | **57.5±3.2 (2.93×)** | **56.5±1.7 (2.85×)** |
 
 ### Takeaways
 
@@ -290,7 +290,7 @@ Int4 body = RTN. Wide hidden (2048) + smaller vocab ⇒ head is a relatively sma
 win is the most modest of the set (similar to Qwen).
 
 ```bash
-bash turbohead/surgery/build_all.sh meta-llama/Llama-3.2-1B llama3_2_1b
+bash src/turbohead/surgery/build_all.sh meta-llama/Llama-3.2-1B llama3_2_1b
 R=artifacts/llama3_2_1b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -319,8 +319,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 18.2±0.7 (1.57×) | 29.7±0.3 (1.71×) | 37.3±2.1 (1.85×) | 38.6±4.0 (1.86×) |
 | head4 g128 | 20.0±0.6 (1.72×) | 32.9±1.5 (1.89×) | 43.5±1.0 (2.16×) | 45.1±1.0 (2.17×) |
 | head4 g32 | 18.9±0.6 (1.63×) | 32.4±0.8 (1.86×) | 39.9±0.6 (1.98×) | 41.0±0.7 (1.98×) |
-| flash onnx (A) | 20.6±1.1 (1.77×) | 35.2±0.7 (2.02×) | 39.1±3.0 (1.94×) | 46.1±1.0 (2.22×) |
-| **flash fused (H)** | **24.2±0.3 (2.09×)** | **38.9±0.5 (2.23×)** | **48.4±1.3 (2.40×)** | 46.6±6.7 (2.24×) |
+| flash onnx | 20.6±1.1 (1.77×) | 35.2±0.7 (2.02×) | 39.1±3.0 (1.94×) | 46.1±1.0 (2.22×) |
+| **flash fused** | **24.2±0.3 (2.09×)** | **38.9±0.5 (2.23×)** | **48.4±1.3 (2.40×)** | 46.6±6.7 (2.24×) |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -330,8 +330,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 16.3±0.7 (1.45×) | 26.4±1.6 (1.51×) | 32.1±2.3 (1.58×) | 35.0±0.9 (1.65×) |
 | head4 g128 | 18.8±0.7 (1.68×) | 31.0±1.5 (1.78×) | 40.6±1.5 (1.99×) | 41.2±0.9 (1.94×) |
 | head4 g32 | 18.8±0.7 (1.67×) | 30.3±1.4 (1.73×) | 35.5±2.7 (1.74×) | 35.6±0.9 (1.68×) |
-| flash onnx (A) | 21.4±0.4 (1.91×) | 33.6±0.7 (1.93×) | 42.2±1.8 (2.07×) | 44.5±1.6 (2.10×) |
-| **flash fused (H)** | **23.3±0.4 (2.08×)** | **36.3±1.4 (2.08×)** | **43.9±2.9 (2.16×)** | **46.0±4.4 (2.16×)** |
+| flash onnx | 21.4±0.4 (1.91×) | 33.6±0.7 (1.93×) | 42.2±1.8 (2.07×) | 44.5±1.6 (2.10×) |
+| **flash fused** | **23.3±0.4 (2.08×)** | **36.3±1.4 (2.08×)** | **43.9±2.9 (2.16×)** | **46.0±4.4 (2.16×)** |
 
 ### Takeaways
 
@@ -349,7 +349,7 @@ Int4 body = RTN. Wide hidden (2048) + the most layers of the set ⇒ smallest he
 win is the most modest measured (just under Llama, which shares D=2048 but has fewer layers).
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3-1.7B qwen3_1_7b
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3-1.7B qwen3_1_7b
 R=artifacts/qwen3_1_7b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -378,8 +378,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 15.5±0.1 (1.65×) | 24.3±0.2 (1.65×) | 28.4±0.4 (1.74×) | 28.4±0.3 (1.72×) |
 | head4 g128 | 16.8±0.2 (1.80×) | 25.5±1.0 (1.74×) | 31.8±0.2 (1.95×) | 31.0±2.3 (1.88×) |
 | head4 g32 | 16.3±0.2 (1.74×) | 25.6±0.3 (1.75×) | 30.5±0.4 (1.87×) | 30.4±0.3 (1.85×) |
-| flash onnx (A) | 17.7±0.1 (1.89×) | 27.3±0.5 (1.86×) | 32.7±0.4 (2.00×) | 32.5±0.4 (1.98×) |
-| **flash fused (H)** | **19.2±0.4 (2.05×)** | **29.1±0.4 (1.99×)** | **34.9±0.8 (2.14×)** | **35.3±0.4 (2.14×)** |
+| flash onnx | 17.7±0.1 (1.89×) | 27.3±0.5 (1.86×) | 32.7±0.4 (2.00×) | 32.5±0.4 (1.98×) |
+| **flash fused** | **19.2±0.4 (2.05×)** | **29.1±0.4 (1.99×)** | **34.9±0.8 (2.14×)** | **35.3±0.4 (2.14×)** |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -389,8 +389,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 14.6±0.3 (1.60×) | 22.4±0.5 (1.63×) | 26.9±0.2 (1.69×) | 27.0±0.2 (1.67×) |
 | head4 g128 | 16.3±0.1 (1.79×) | 25.2±0.3 (1.83×) | 29.8±0.3 (1.87×) | 30.1±0.3 (1.86×) |
 | head4 g32 | 15.6±0.2 (1.71×) | 23.8±0.3 (1.73×) | 28.4±0.3 (1.78×) | 29.0±0.3 (1.79×) |
-| flash onnx (A) | 17.2±0.3 (1.88×) | 27.1±0.2 (1.97×) | 32.6±0.3 (2.04×) | 32.9±0.6 (2.03×) |
-| **flash fused (H)** | **19.2±0.2 (2.10×)** | **29.4±0.4 (2.14×)** | **34.9±0.4 (2.18×)** | **35.5±0.5 (2.19×)** |
+| flash onnx | 17.2±0.3 (1.88×) | 27.1±0.2 (1.97×) | 32.6±0.3 (2.04×) | 32.9±0.6 (2.03×) |
+| **flash fused** | **19.2±0.2 (2.10×)** | **29.4±0.4 (2.14×)** | **34.9±0.4 (2.18×)** | **35.5±0.5 (2.19×)** |
 
 ### Takeaways
 
@@ -415,7 +415,7 @@ numpy from the tied embedding (`head_W`) and builds the 3-D position_ids itself 
 so it benches end-to-end despite the hybrid SSM state. (Earlier this model was quality-only.)
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3.5-0.8B qwen3_5_0_8b
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3.5-0.8B qwen3_5_0_8b
 R=artifacts/qwen3_5_0_8b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -444,8 +444,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 27.1±0.2 (1.87×) | 39.8±0.4 (1.82×) | 46.2±0.3 (1.91×) | 46.1±0.4 (1.89×) |
 | head4 g128 | 32.2±0.3 (2.22×) | 45.2±1.0 (2.07×) | 52.7±0.7 (2.18×) | 54.2±0.9 (2.22×) |
 | head4 g32 | 29.9±1.2 (2.06×) | 43.3±1.7 (1.98×) | 50.0±0.6 (2.07×) | 50.2±0.4 (2.05×) |
-| flash onnx (A) | 37.3±0.5 (2.57×) | 51.7±1.3 (2.36×) | 59.7±0.9 (2.47×) | 59.7±0.5 (2.44×) |
-| **flash fused (H)** | **40.8±0.5 (2.82×)** | **55.8±1.0 (2.55×)** | **64.1±1.3 (2.65×)** | **63.8±0.8 (2.61×)** |
+| flash onnx | 37.3±0.5 (2.57×) | 51.7±1.3 (2.36×) | 59.7±0.9 (2.47×) | 59.7±0.5 (2.44×) |
+| **flash fused** | **40.8±0.5 (2.82×)** | **55.8±1.0 (2.55×)** | **64.1±1.3 (2.65×)** | **63.8±0.8 (2.61×)** |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -455,8 +455,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 23.9±0.3 (1.73×) | 33.7±0.9 (1.64×) | 39.1±2.3 (1.74×) | 40.1±0.2 (1.76×) |
 | head4 g128 | 28.2±0.4 (2.04×) | 39.4±0.9 (1.92×) | 45.5±0.5 (2.02×) | 46.0±0.3 (2.02×) |
 | head4 g32 | 26.8±0.6 (1.94×) | 37.1±1.2 (1.80×) | 43.8±1.1 (1.95×) | 42.1±2.0 (1.85×) |
-| flash onnx (A) | 33.6±0.9 (2.43×) | 43.2±3.8 (2.10×) | 57.3±1.0 (2.55×) | 55.7±1.2 (2.44×) |
-| **flash fused (H)** | **38.1±0.3 (2.75×)** | **51.4±1.1 (2.50×)** | **57.8±2.2 (2.57×)** | **58.9±0.8 (2.58×)** |
+| flash onnx | 33.6±0.9 (2.43×) | 43.2±3.8 (2.10×) | 57.3±1.0 (2.55×) | 55.7±1.2 (2.44×) |
+| **flash fused** | **38.1±0.3 (2.75×)** | **51.4±1.1 (2.50×)** | **57.8±2.2 (2.57×)** | **58.9±0.8 (2.58×)** |
 
 ### Takeaways
 
@@ -476,7 +476,7 @@ so the flash win is the smallest of the set and even dense quant heads are compe
 noisier here than for the larger models (a fast ~20 ms/step model amplifies run-to-run variance).
 
 ```bash
-bash turbohead/surgery/build_all.sh h2oai/h2o-danube3-500m-chat danube3_500m
+bash src/turbohead/surgery/build_all.sh h2oai/h2o-danube3-500m-chat danube3_500m
 R=artifacts/danube3_500m
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -505,8 +505,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 49.8±0.7 (1.39×) | 85.5±3.9 (1.59×) | 106.0±2.3 (1.63×) | 108.8±2.1 (1.60×) |
 | head4 g128 | 54.9±1.3 (1.53×) | 73.2±8.1 (1.36×) | 73.8±10.2 (1.13×) | 80.8±11.0 (1.19×) |
 | head4 g32 | 41.9±2.7 (1.17×) | 81.7±5.4 (1.52×) | 71.6±14.9 (1.10×) | 79.7±7.3 (1.17×) |
-| flash onnx (A) | 44.0±1.5 (1.23×) | 67.3±3.7 (1.25×) | 76.3±4.5 (1.17×) | 78.8±5.7 (1.16×) |
-| **flash fused (H)** | **51.9±5.3 (1.45×)** | 70.8±6.7 (1.31×) | 76.9±4.5 (1.18×) | 83.5±2.2 (1.23×) |
+| flash onnx | 44.0±1.5 (1.23×) | 67.3±3.7 (1.25×) | 76.3±4.5 (1.17×) | 78.8±5.7 (1.16×) |
+| **flash fused** | **51.9±5.3 (1.45×)** | 70.8±6.7 (1.31×) | 76.9±4.5 (1.18×) | 83.5±2.2 (1.23×) |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -516,8 +516,8 @@ uv run turbohead-head-quality --src $R --npz $R/clusters.npz --head $R/head_W.np
 | head8 g128 | 43.4±0.9 (1.24×) | 60.0±3.7 (1.20×) | 74.1±3.2 (1.33×) | 71.0±4.0 (1.34×) |
 | head4 g128 | 46.7±0.7 (1.33×) | 70.8±5.1 (1.42×) | 89.5±4.9 (1.61×) | 88.4±12.9 (1.67×) |
 | head4 g32 | 45.0±1.7 (1.29×) | 69.4±2.8 (1.39×) | 84.0±3.1 (1.51×) | 82.4±3.2 (1.55×) |
-| flash onnx (A) | 38.5±1.5 (1.10×) | 56.4±2.4 (1.13×) | 65.9±2.5 (1.18×) | 66.0±6.5 (1.24×) |
-| **flash fused (H)** | **42.3±4.9 (1.21×)** | 68.0±8.9 (1.36×) | 87.4±2.9 (1.57×) | 92.8±5.0 (1.75×) |
+| flash onnx | 38.5±1.5 (1.10×) | 56.4±2.4 (1.13×) | 65.9±2.5 (1.18×) | 66.0±6.5 (1.24×) |
+| **flash fused** | **42.3±4.9 (1.21×)** | 68.0±8.9 (1.36×) | 87.4±2.9 (1.57×) | 92.8±5.0 (1.75×) |
 
 ### Takeaways
 
@@ -561,7 +561,7 @@ cap=16, K=4096, P=256. LiquidAI hybrid — most layers are short convolutions wi
 it benches end-to-end — unlike Qwen3.5-0.8B, which splits the embedding out.
 
 ```bash
-bash turbohead/surgery/build_all.sh LiquidAI/LFM2.5-350M lfm2_5_350m
+bash src/turbohead/surgery/build_all.sh LiquidAI/LFM2.5-350M lfm2_5_350m
 R=artifacts/lfm2_5_350m
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -595,8 +595,8 @@ read across models.** Flash coverage 85.0% at P=256; *covered* PPL = 73.5.
 | head8 g128 | 69.3±0.8 (1.52×) | 100.6±2.4 (1.53×) | 117.3±3.1 (1.64×) | 111.9±1.0 (1.54×) |
 | head4 g128 | 75.9±0.9 (1.66×) | 108.8±1.4 (1.65×) | 134.3±3.1 (1.88×) | 127.0±24.9 (1.75×) |
 | head4 g32 | 74.4±2.4 (1.63×) | 109.5±2.0 (1.66×) | 127.1±3.3 (1.78×) | 128.0±3.5 (1.77×) |
-| flash onnx (A) | 72.1±1.1 (1.58×) | 102.3±2.5 (1.55×) | 120.4±2.7 (1.69×) | 121.5±0.5 (1.68×) |
-| **flash fused (H)** | **84.0±1.7 (1.84×)** | **116.4±3.3 (1.77×)** | **134.4±3.7 (1.88×)** | **136.9±3.8 (1.89×)** |
+| flash onnx | 72.1±1.1 (1.58×) | 102.3±2.5 (1.55×) | 120.4±2.7 (1.69×) | 121.5±0.5 (1.68×) |
+| **flash fused** | **84.0±1.7 (1.84×)** | **116.4±3.3 (1.77×)** | **134.4±3.7 (1.88×)** | **136.9±3.8 (1.89×)** |
 
 ### Speed — sampling, temp 0.8 (tok/s, median ± std; × vs head16)
 
@@ -606,8 +606,8 @@ read across models.** Flash coverage 85.0% at P=256; *covered* PPL = 73.5.
 | head8 g128 | 66.1±0.8 (1.58×) | 95.7±10.1 (1.57×) | 109.3±1.2 (1.60×) | 108.6±1.9 (1.56×) |
 | head4 g128 | 75.2±2.1 (1.80×) | 104.7±2.3 (1.71×) | 119.4±3.2 (1.75×) | 121.0±2.4 (1.74×) |
 | head4 g32 | 70.5±2.1 (1.69×) | 99.6±2.3 (1.63×) | 116.3±3.1 (1.71×) | 115.4±2.8 (1.66×) |
-| flash onnx (A) | 70.2±1.7 (1.68×) | 101.4±2.5 (1.66×) | 116.0±2.6 (1.70×) | 119.8±1.0 (1.72×) |
-| **flash fused (H)** | **85.0±3.0 (2.04×)** | **117.5±3.1 (1.92×)** | **132.0±3.5 (1.94×)** | **133.9±2.6 (1.92×)** |
+| flash onnx | 70.2±1.7 (1.68×) | 101.4±2.5 (1.66×) | 116.0±2.6 (1.70×) | 119.8±1.0 (1.72×) |
+| **flash fused** | **85.0±3.0 (2.04×)** | **117.5±3.1 (1.92×)** | **132.0±3.5 (1.94×)** | **133.9±2.6 (1.92×)** |
 
 ### Takeaways
 
@@ -687,3 +687,11 @@ Open items, roughly in priority order:
    raising `P` to 384–512 is nearly-free accuracy; only extreme head share has a real tradeoff). The
    `cap` axis (re-cluster per value; trades stage-1 `K=V/cap` vs stage-2 `P·cap`) is still unexplored —
    worth a sweep on the 2–3 highest-head-share models if pursuing further.
+5. **Multiple-assignment (`--r 2`) — shipped (2026-06-21).** `turbohead-build-clusters --r 2` gives each
+   token a balanced 2nd home cluster (table grows `cap→2·cap`, stage-1 gemv/`K` unchanged), catching the
+   recall tail. On Qwen3-0.6B it lifts top-1 agreement **+2.0pp @256 (96.75→98.78)**; with int8 stage-2
+   (`turbohead-splice --head-weight-dtype int8`) **+1.25pp (→98.00)** at **~1% end-to-end TPS** vs the
+   deployed fp32 head (0.99×@1t and @4t; int8 halves the doubled gather, so the old fp32 "~25%" estimate
+   collapses to noise — r=2-int8 vs int8-r=1 is ~1–3%). Keeps the **sharp** centroids (rebuilding over
+   doubled members blurs them and loses). Sampling dedups the twice-listed tail token in `decode_loop`.
+   Per-model like `--eta`: sweep agreement before adopting. See `experimental/multiple_assignment/`.

@@ -3,9 +3,9 @@
 Two interchangeable backends — choose at splice time; the decode loop auto-detects which one a
 model uses, so the run command is identical either way:
 
-  onnx  — stage 2 as plain ONNX ops; emits full (1,V) logits (contract A). No native library,
+  onnx  — stage 2 as plain ONNX ops; emits full (1,V) logits (logits-out). No native library,
           maximal portability. Use when you need full-vocab logits or can't ship a .so.
-  fused — stage 2 as a single custom op; emits the candidate shortlist (contract H). Needs
+  fused — stage 2 as a single custom op; emits the candidate shortlist (shortlist-out). Needs
           csrc/libturbohead.so (build: bash csrc/build.sh). Fastest; greedy + sampling. Default.
 
 Both backends share stage 1 (int4 centroid scoring + TopK) and the same clustering assets; they
@@ -28,6 +28,9 @@ from turbohead.surgery.build_subgraph import (
     stage1_nodes, onnx_stage2_nodes, fused_stage2_nodes, quantize_stage1,
 )
 
+# Bare-CLI defaults for the ad-hoc single-model workflow (matches convert_baseline.sh's default
+# OUT + the flat artifacts/ paths the other eval/surgery tools default to). build_all.sh and the
+# README examples always pass --src/--npz/--head explicitly; these only seed a no-arg run.
 DEFAULT_SRC = "artifacts/qwen3_0_6b_int4_cpu"
 CLUSTERS = "artifacts/clusters.npz"
 HEAD_W = "artifacts/head_W.npy"
@@ -64,9 +67,11 @@ def read_eos(src):
 
 
 def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", block_size=128,
-           npz=CLUSTERS, head=HEAD_W, head_weight_dtype="fp32", head_reduce="none"):
+           npz=CLUSTERS, head=HEAD_W, head_weight_dtype="fp32", always_score=None):
     """Splice the flash head into `src` -> `dst` using `backend` ('fused' or 'onnx').
-    `npz`/`head` are the clustering assets for this model (default the Qwen3-0.6B paths)."""
+    `npz`/`head` are the clustering assets for this model (default the Qwen3-0.6B paths).
+    `always_score`: path to an .npy of token ids to always score (the frequently-misrouted ids from
+    turbohead-calibrate-misses), unioned into the EOS specials so they can't be missed. None = off."""
     if backend not in DST_SUFFIX:
         raise ValueError(f"backend must be 'fused' or 'onnx', got {backend!r}")
     dst = dst or f"{src}{DST_SUFFIX[backend]}"
@@ -77,8 +82,13 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
     Cnorm, Wperm, Vmap = z["Cnorm"], z["Wperm"], z["Vmap"]
     K, cap, D = Wperm.shape
     V = K * cap
+    # always-scored specials: EOS/BOS, plus the calibrated frequent-miss ids if --always-score given.
     special_ids = np.asarray(read_eos(src), np.int64)
-    N = 1 if head_reduce == "argmax" else P * cap + len(special_ids)
+    if always_score:
+        extra = np.load(always_score).astype(np.int64).ravel()
+        special_ids = np.unique(np.concatenate([special_ids, extra]))  # dedup; order doesn't matter
+        logger.info(f"always-score: +{len(extra)} ids -> {len(special_ids)} specials total")
+    N = P * cap + len(special_ids)
     Wspec = np.load(head)[special_ids]  # (S,D) fp32; stage-2 builders cast as needed
 
     copy_configs(src, dst)
@@ -102,10 +112,10 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
                                      "fh_logits2d")
         nodes += s2n + [helper.make_node("Reshape", ["fh_logits2d", "fh_shp_11V"], ["logits"])]
         inits += s2i + [_i64v("fh_shp_11V", [1, 1, V])]
-        # `logits` graph output already declared by the export — reused as-is (contract A)
-    else:  # fused (contract H): emit the shortlist, drop the (1,V) logits output
+        # `logits` graph output already declared by the export — reused as-is (logits-out)
+    else:  # fused (shortlist-out): emit the shortlist, drop the (1,V) logits output
         s2n, s2i = fused_stage2_nodes(Wperm, Vmap, Wspec, special_ids, "fh_hlast", ti1,
-                                      weight_dtype=head_weight_dtype, reduce=head_reduce)
+                                      weight_dtype=head_weight_dtype)
         nodes += s2n
         inits += s2i
         kept = [o for o in g.output if o.name != "logits"]
@@ -136,7 +146,7 @@ def _i64v(name, arr):
 def main():
     ap = argparse.ArgumentParser(description="Splice TurboHead into a quantized genai ONNX model")
     ap.add_argument("--backend", default="fused", choices=["fused", "onnx"],
-                    help="fused = custom-op shortlist (contract H, fastest); onnx = portable (1,V) logits (contract A)")
+                    help="fused = custom-op shortlist (shortlist-out, fastest); onnx = portable (1,V) logits (logits-out)")
     ap.add_argument("--src", default=DEFAULT_SRC, help="baseline genai ONNX dir")
     ap.add_argument("--dst", default=None, help="output dir (default: <src><_fused|_onnx>)")
     ap.add_argument("--npz", default=CLUSTERS, help="clusters .npz for this model")
@@ -148,13 +158,13 @@ def main():
     ap.add_argument("--head-weight-dtype", default="fp32", choices=["fp32", "int8"],
                     help="fused stage-2 weight precision (int8 = FlashHeadSelectQ8, 4x less "
                          "head read; fused backend only)")
-    ap.add_argument("--head-reduce", default="none", choices=["none", "argmax"],
-                    help="fused stage-2 reduction: none = full shortlist (greedy+sampling); "
-                         "argmax = fold top-1 into the op, emit 1-elem shortlist (greedy-only; "
-                         "CPU analog of embedl fused-argmax/atomic kernels; fused backend only)")
+    ap.add_argument("--always-score", default=None,
+                    help="npy of token ids to ALWAYS score: unions them into the always-scored "
+                         "specials so frequently-misrouted tokens can't be missed (~free, lifts "
+                         "top-1 agreement). Omit to disable. Build with turbohead-calibrate-misses.")
     a = ap.parse_args()
     splice(a.src, a.dst, a.backend, a.probes, a.stage1, a.block_size, a.npz, a.head,
-           a.head_weight_dtype, a.head_reduce)
+           a.head_weight_dtype, a.always_score)
 
 
 if __name__ == "__main__":

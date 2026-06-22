@@ -64,7 +64,7 @@ nearest-neighbor search, applied one level up.) It is the only lever that lowers
 which adaptive probing cannot touch, and it matters most exactly where the paper is heading (large
 `K`).
 
-**POC result: tested, not worth it in the naive form.** See `logs/hierarchical_stage1_poc.py`.
+**POC result: tested, not worth it in the naive form.** See `experimental/hierarchical_stage1/hierarchical_stage1_poc.py`.
 On Qwen3-0.6B (4000 WikiText-2 positions, flat baseline agreement at P=256 is 96.8%):
 
 - Single-assignment 2-level routing (each leaf belongs to exactly one super-centroid): `M=64`
@@ -110,7 +110,7 @@ a per-cluster correction based on its radius or its largest-norm member. This is
 the data-aware routing prototype: swap the routing matrix, recompute required-P on the same hidden
 states. Fast to falsify and grounded in standard MIPS theory.
 
-**POC result: tested, no win.** See `logs/mips_routing_poc.py`. Same 4000 WikiText-2 positions,
+**POC result: tested, no win.** See `experimental/mips_routing/mips_routing_poc.py`. Same 4000 WikiText-2 positions,
 cosine baseline top-1 agreement at P=256 is 96.8%. Three routing swaps, with the cluster groups
 held fixed (only the ranking score changes). Lower required-P is better:
 
@@ -133,6 +133,28 @@ shared length scale, so cosine is already close to inner product for ranking, mi
 length noise. The inner-product framing nudges the median (p50 4 vs 5) but loses the metric that
 matters (top-1). Parked.
 
+**Follow-up POC: three more free routing swaps, all lose.** See `experimental/recall_lift/recall_lift_poc.py` (lever 1),
+12k WikiText-2 positions, held-out fit/eval split, cosine baseline agree@256 = 97.5%:
+
+| routing swap | agree@256 | why it fails |
+|---|---|---|
+| learned-`h` prototype (mean of the hidden states that select each cluster) | 89.9% | `K=9496` clusters but only ~6k calibration tokens, so most clusters are fit from 0–1 noisy samples; the embedding-mean centroid uses all 16 members and is far more stable |
+| mean-centered cosine (subtract the train-mean `h̄`) | 74.4% | the "common-mode" direction the hidden states share is *highly* discriminative for routing here, not removable noise — deleting it destroys the signal |
+| diagonal-whitened cosine (scale dims by `1/std(h)`) | 77.3% | same: the anisotropy-removal trick from embedding-similarity work does not transfer, because the centroids live in the same anisotropic space and rely on that structure |
+
+A later POC closed the one remaining gap: those swaps were all *fixed/unsupervised*, so
+`experimental/learned_metric/learned_metric_poc.py` **trained** a general linear routing map `L (D×D)`
+by gradient descent on the recall objective (ScaNN-style score-aware loss applied to the query metric,
+the steelman of whitened_routing) and folded it into the centroids. It improves the median rank (4→2)
+but **triples p99 (842→2644)**, losing ~4pp at every `P`: the discriminative metric wins the frequent
+clusters and distorts the idiosyncratic tail, where top-1 actually lives. Low-rank and
+identity-shrinkage lose the same way, so it is not overparameterization.
+
+Conclusion across all three POCs: **cosine-on-the-embedding-mean is at the ceiling for any single
+linear routing pass, learned or fixed.** Stop hunting for a better routing *matrix*; the remaining
+wins keep routing exact and reshape the partition (`anisotropic_clustering`, `multiple_assignment`) or
+sidestep routing (`always-score`).
+
 ## Improves fidelity, not speed
 
 ### 4. Coverage-corrected probabilities
@@ -144,7 +166,7 @@ total probability mass, so add an analytic correction for the unprobed clusters 
 denominator `Z` honest, without scoring all `V` tokens. This makes likelihood and sampling
 first-class instead of needing the Monte-Carlo workaround the paper uses.
 
-**POC result: tested, clear win on the part that matters.** See `logs/coverage_correction_poc.py`.
+**POC result: tested, clear win on the part that matters.** See `experimental/coverage_correction/coverage_correction_poc.py`.
 Qwen3-0.6B, 1000 WikiText-2 positions, with the genuine corpus next-token as the target (not the
 model's own argmax, which would almost always be probed and hide the problem), `P=256`. At `P=256`,
 11.2% of real next-tokens land in an unprobed cluster, so the hole is material.
@@ -196,6 +218,131 @@ Stage 1 already ran, so the second pass is just extra gathers in stage 2. This s
 "can we predict required-P" question by measuring uncertainty after a cheap first look. A low-risk
 variant of the adaptive-probing thesis.
 
+**POC result: tested, ~break-even with just raising `P`.** See `experimental/recall_lift/recall_lift_poc.py` (lever 3),
+12k WikiText-2 positions. Probe `P0=64`, escalate to `P1=512` when the gap between the top-two
+*probed* exact logits is below a threshold. At threshold 2.0: 54.8% escalate, average `P=309`,
+agree 97.6% — essentially the same as fixed `P=256` (97.5%) for the same cost. The margin is a weak
+predictor because the failure mode is a winner you *didn't* probe, which the margin over the probed
+set cannot see. Confirms the "no cheap confidence signal" open problem above.
+
+We also tested the **exact-stop** variant (lever 2): probe in cosine order, stop the moment a
+provable upper bound (`mu_k·h + ‖h‖·radius_k`, Cauchy-Schwarz) says no unprobed cluster can beat the
+best logit found, giving a *guaranteed* exact top-1. It degenerates: average stop-`P` ≈ `K` (the
+whole vocab). The bound is far looser than the gaps between logits, so almost every cluster "could"
+still hold the winner — certifying the max costs as much as the dense head. Parked.
+
+### 8. Always-score the tokens FlashHead most often misses  ✅ implemented
+
+The other ideas chase the heavy tail in general. This one asks a narrower question: **are the misses
+the *same* tokens every time?** They partly are. The graph already always-scores a few special
+tokens (EOS/BOS) by stuffing their weight rows into the stage-2 `Wspec`/`spec_ids` path, scored
+every step regardless of routing. Lever 4 extends that list with the tokens a calibration pass found
+FlashHead routes badly — so they can never be missed, at the cost of a handful of extra scored rows.
+
+**POC result: the win.** See `experimental/recall_lift/recall_lift_poc.py` (lever 4), 12k positions, held-out. Fitting
+the most-missed set on the train half and measuring on eval, a **64-token** always-score list
+rescues **52% of all misses → agree@256 rises 97.5% → 98.8%**. The curve plateaus immediately
+(top-64 = top-4096): about half the misses are a small set of frequent tokens (function words,
+punctuation) that route badly *independent of context*; the other half are idiosyncratic one-offs no
+fixed list can catch. The cost is ~free — the always-scored rows ride the existing `Wspec` path, a
+few dozen extra dot products per step against a ~17 MB-per-step head.
+
+Why it works where routing tricks don't: a chronically-misrouted frequent token has a bad *cluster
+assignment* (its embedding sits far from its cluster's centroid), so no stage-1 score will rank it
+in. Routing can't fix a bad assignment; always-scoring sidesteps routing for that token entirely.
+
+It **stacks** with simply raising `P` (`P=256→512` independently buys 97.5%→98.3%), so
+`always-score + P=512` reaches the ~99% region at modest cost.
+
+**Frontier follow-up** (`experimental/recall_lift/frontier_poc.py`, 2026-06-21): the always-score lift
+*grows* as `P` shrinks (+0.6pp @512 → +5.3pp @32), and `N=64` @ `P=192` already matches the `P=256`
+no-list baseline. Tempting as a TPS-saving P cut, but the real decode bench says no on the deployed
+**fused** backend: P=256→128 moves it ~2% (within noise) because the head is dominated by the
+P-independent stage-1 int4 gemv, not the cheap `P·cap` stage-2 gather (P=256→128 buys ~10% on the
+slower **onnx** backend, where the gather is a real share). So always-score's payoff on the fast path
+is **more recall at the current P**, not a lower-P speedup. Lever for fused TPS stays the stage-1
+gemv / body, not P. (See `experimental/recall_lift/LOG.md`.)
+
+How to build/use it (this is what shipped):
+
+- **Calibrate** (offline, needs the HF model): `turbohead-calibrate-misses --model <hf> --npz
+  <clusters.npz> -P 256 --top 64 --out <dir>/always_score.npy`. One pass over WikiText-2: capture the
+  hidden states, find the dense argmax tokens whose cluster ranks below `P`, write the `--top` most
+  frequent ids. It is calibration-data- and model-specific (refit per model).
+- **Splice it in**: `turbohead-splice ... --always-score <dir>/always_score.npy`. Those ids are
+  unioned into the always-scored specials. **Omit the flag to turn lever 4 off** — that is the
+  on/off switch. `build_all.sh` runs the calibration and passes the flag automatically; set
+  `ALWAYS_SCORE=0` to skip it.
+
+## Beyond the head: the KV cache (body, orthogonal to FlashHead)
+
+These attack why tokens-per-second *drops as the context grows*, which is a body problem the head
+cannot touch. Decode per-step latency on Qwen3-0.6B is roughly `19 ms + 0.05 ms × S` (S = context
+length): a fixed floor (the int4 body matmuls) plus a term that grows linearly with how many tokens
+are already in the cache. That linear term is the **KV cache** (the stored keys/values every new
+token attends to). It splits in two: the *fundamental* part is attention reading the whole cache
+once per step; the *avoidable* part is copying the cache in and out each step.
+
+### 6. Buffer-shared KV cache (DONE, positive — shipped in `decode_loop.py`)
+
+The default decode loop fed the cache back as numpy every step, so ONNX Runtime reallocated and
+copied the entire cache (about 224 KB per token) on every token. `share_kv` instead pre-allocates
+one fixed max-length buffer per layer and tells the attention op to write each new key/value
+*in place* (bind past-input and present-output to the same memory; the attention op learns the
+valid length from a full-width attention mask). No reallocation, no copy.
+
+**Result: byte-identical output, the per-step growth slope roughly halves** (~53 → ~23 ms per 1000
+context tokens), giving ~1.2× decode at 400 tokens and more as context grows. Measured against
+onnxruntime-genai's own runtime on the same graph, which hits the same slope, so this is the
+expected ceiling for the copy fix. POC and A/Bs in `experimental/buffershare/buffershare_poc.py`, `experimental/genai_kv/genai_kv_poc.py`,
+`experimental/kv_scaling/kv_scaling_poc.py`.
+
+**Applicability.** On by default and verified byte-identical on the 6 pure-KV transformers (Qwen3
+0.6B/1.7B, Gemma3 270M/1B, Llama-3.2-1B, danube3-500M). Auto-disabled — falls back to the
+numpy path, no regression — on the two models with fixed-size state (LFM2.5 hybrid conv/SSM,
+Qwen3.5), since the in-place trick needs every state tensor to grow by one row per step. The gate
+(`all state inputs grow` and `attention_mask` exists) fails closed: a model that doesn't qualify is
+slower, never wrong.
+
+**The buffer is finite; once full it slides.** The buffer is pre-allocated to a fixed length
+(`max_kv`, default = exactly this request's `prompt + max_new`). That length is also the memory
+ceiling: about 224 KB/token on Qwen3-0.6B, so a 2048 buffer is ~450 MB, a 32k buffer ~7 GB — that
+linear up-front cost is inherent to static KV, the same trade genai makes. **When a generation reaches
+the buffer, `generate` slides: it drops the oldest tokens and re-prefills the most-recent window
+(`_slide_keep`, default 3/4 of the buffer) at positions 0..keep-1.** We never write past the buffer:
+ORT's GQA writes each new key/value in place at offset = past-sequence-length, so an over-long write
+would land outside the arena (segfault or silent corruption, not a realloc). A slide resets that
+offset to 0 by re-prefilling, and normal steps append at `clen < cap`, so every write stays in bounds.
+
+**Why re-prefill instead of shift-and-re-rotate.** GQA derives the RoPE position, the write offset,
+and `seqlens_k` from the *same* past-length value, so you cannot ask it to "write at slot 1792 but
+rotate as if at absolute position 9000" — a ring buffer is impossible, and an in-place left-shift would
+leave the surviving keys rotated at their old absolute positions, breaking relative distances. The
+classic fix re-rotates every surviving key into the compacted frame, which means replicating each
+model's exact RoPE (theta base, partial-rotary fraction, any scaling) in numpy and giving up the
+byte-identical regression test. We skip all of that: re-prefilling the kept token *ids* through the
+model recomputes their K/V at the compacted positions correctly, by construction, with zero per-model
+code. The retained context is exact (byte-identical to a fresh run on that window — see
+`test_reprefill_resets_shared_cache`); only the *dropped* tokens are lost, which is what a sliding
+window means. Cost is one window-length prefill per slide, amortized `keep / (cap - keep)`
+prefill-tokens per generated token (prefill is far cheaper per token than decode, so this is small).
+(`local_window_size` on the GQA op only masks attention scope — it does *not* bound the cache memory,
+so it does not solve this.)
+
+### 7. Quantized (int8 / int4) KV cache
+
+After buffer-sharing, the part of the slope that remains is attention *reading* the fp32 cache. Store
+the cache in int8 or int4 instead of fp32 and that read moves 4× or 8× fewer bytes, shrinking the
+residual slope. *What it is:* the same idea as int4 weights (`MatMulNBits`) applied to the keys and
+values, dequantized on the fly inside attention.
+
+The blocker is purely kernel support: ONNX Runtime's CPU `GroupQueryAttention` only handles
+fp32/fp16 cache today, and `-p fp16 -e cpu` from the genai builder drops both the int4 body and the
+GQA op and then crashes on CPU. So this is not a re-export — it is a **custom attention op** with a
+quantized cache, the same class of effort as the FlashHead op, with the extra wrinkle that the cache
+read is strided rather than one dense matmul. High ceiling on long-context throughput, real build
+cost. Park behind shipping #6 broadly.
+
 ## Not worth it
 
 - **Variable cluster size by token importance.** Fights the equal-size kernel requirement (the
@@ -206,12 +353,22 @@ variant of the adaptive-probing thesis.
 
 ## Suggested order
 
-1. Cascade probing (low-risk variant of adaptive probing). Untested.
+1. Raise `P` if more agreement is wanted (the only reliable knob on the idiosyncratic tail);
+   stacks with #8. `P=256→512` buys 97.5%→98.3%; the latency cost is backend-dependent — real on the
+   onnx backend, ~free on the deployed fused backend (P is not its bottleneck, see §8 frontier note).
 
-Done, positive: coverage correction (#4). Corrected-`Z` likelihood matches gold PPL (10277 down to
+Done, positive: always-score frequent misses (#8), shipped — `turbohead-calibrate-misses` +
+`turbohead-splice --always-score`, +1.3pp agreement (97.5%→98.8%) at ~free cost, on/off via the flag.
+Parked: free routing swaps (#3) and cascade/exact-stop (#5), both no better than fixed `P` — see
+`experimental/recall_lift/recall_lift_poc.py`.
+Done, positive: buffer-shared KV (#6), shipped — halves the per-step-vs-length slope, byte-identical.
+Coverage correction (#4). Corrected-`Z` likelihood matches gold PPL (10277 down to
 9.76) when the token is known, which unblocks PPL evaluation and the spec-decode acceptance test.
 Promote to implementation: store the per-cluster mean-logit norms in the npz, and add the tail term
 where the head emits probabilities.
+
+Next on the body axis: quantized KV cache (#7), a custom attention op — the high-ceiling lever for
+long-context throughput once buffer-sharing is in everywhere.
 
 Parked: MIPS-aware ranking (#3), because the POC showed cosine already beats every inner-product
 and norm-bound routing on top-1. Hierarchical stage-1 (#1), because the POC showed it is

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 TurboHead replaces a quantized LLM's dense `[V,D]` language-model-head matmul with an approximate
 clustering head (the FlashHead method, arXiv 2603.14591) and **splices it into an existing ONNX
 model**, so any `onnxruntime` CPU deploy gets the speedup. CPU EP, int4 body. Two flash backends:
-`onnx` (portable standard ops, contract A) and `fused` (a custom CPU op, contract H — fastest).
+`onnx` (portable standard ops, logits-out) and `fused` (a custom CPU op, shortlist-out — fastest).
 Swept across **8 models** (Qwen3, Gemma3, Llama-3.2, LFM2.5, h2o-danube3, incl. hybrid conv/SSM +
 attention archs): fused decodes **1.45×–5.37× faster than an fp32-equivalent dense head** @1t, scaling
 with the head's share of a decode step. Reference config: `Qwen/Qwen3-0.6B`. README.md has the method
@@ -17,8 +17,9 @@ items**; `docs/ORT_QUIRKS.md` records the measured ORT CPU quirks behind the pre
 ## Commands
 
 ```bash
-uv sync                                    # install (full toolkit); `dev` group adds ruff/pytest/pyrefly
-uv run ruff check turbohead/ tests/        # lint (CI gate)
+uv sync                                    # inference deps only (no torch). `dev` adds ruff/pytest/pyrefly
+uv sync --extra surgery                     # + offline toolkit (torch, genai, onnx) — needed to BUILD/TEST
+uv run ruff check src/turbohead/ tests/        # lint (CI gate)
 uv run pytest -q                           # tests; integration tests self-skip without the model artifact
 uv run pytest tests/test_select.py -q      # a single test file
 ```
@@ -28,7 +29,7 @@ tees logs; `FORCE=1` rebuilds). It runs: int4 baseline → `head_W.npy` → bala
 baselines (`turbohead-quantize-head`) → `onnx` + `fused` splices, then prints the bench/eval commands.
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b   # -> artifacts/qwen3_0_6b/{baseline,head_W.npy,clusters.npz,head{16,8g128,4g128,4g32},onnx,fused,logs}
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b   # -> artifacts/qwen3_0_6b/{baseline,head_W.npy,clusters.npz,head{16,8g128,4g128,4g32},onnx,fused,logs}
 ```
 
 Underlying steps (what build_all wires per-slug; console scripts map to `<module>:main`):
@@ -65,8 +66,10 @@ Three packages, split so the deploy path carries no offline-only deps:
   subprocess** — two custom-op `.so` in one process segfault), `head_quality.py` (`turbohead-head-quality`,
   agreement + PPL on real hidden states via the extracted head subgraph), `agreement.py`/`ppl.py`
   (numpy-reference spot-checks). All hook the HF `lm_head` input over **detokenized** WikiText-2.
+- **`experimental/`** — tried-idea POCs, one standalone folder each; core depends on none of it. Each may
+  import core read-only but overrides locally when it diverges; promote a proven idea into core. See its README.
 
-### The flash head op chain (contract A, two stages)
+### The flash head op chain (logits-out, two stages)
 
 1. **Stage 1 (coarse):** `sims = h · Cᵀ` over `K` centroids → `TopK(P)`. This `[K,D]` gemv at M=1 is the
    dominant head cost; it runs as int4 `MatMulNBits` (W4A16, `accuracy_level=4`) — ~9× faster than fp16
@@ -76,12 +79,12 @@ Three packages, split so the deploy path carries no offline-only deps:
    into a `-1e9`-filled `(1,V)` base. Stage 2 stays **fp32** — the CPU EP has no fp16 matmul kernel
    (it auto-casts), so storing fp32 skips an implicit fp16→fp32 cast of the gathered rows.
 
-### Head contracts (auto-detected from graph outputs in `decode_loop.py`)
+### Graph output shapes (auto-detected from graph outputs in `decode_loop.py`)
 
-- **A (logits-out):** graph emits `logits` `(1,1,V)`; argmax/sampling in Python. The `onnx` backend.
-- **H (shortlist-out):** the `fused` op emits `cand_logits`/`cand_ids` (~`P·cap` scored tokens); V never
+- **logits-out:** graph emits `logits` `(1,1,V)`; argmax/sampling in Python. The `onnx` backend.
+- **shortlist-out:** the `fused` op emits `cand_logits`/`cand_ids` (~`P·cap` scored tokens); V never
   materialized. The `fused` backend — **fastest, current default**.
-- **B (token-out):** graph emits the next-token id directly. Greedy-only; not currently produced.
+- **token-out:** graph emits the next-token id directly. Greedy-only; not currently produced.
 
 Sampling (`temperature>0`) does a probed-softmax over **only** the scored candidates, skipping the
 full-vocab softmax the dense head pays — so sampling speeds up more than greedy.
@@ -102,7 +105,11 @@ full-vocab softmax the dense head pays — so sampling speeds up more than greed
   only `-P`/`--stage1`/`--block-size` shape inference.
 - `onnx.checker` is deliberately skipped on save — it rejects genai's `com.microsoft` contrib ops; ORT
   load validates instead. The dense head node is removed but its weight initializer stays (tied embed).
-- IOBinding zero-copy KV is a net loss under contract A (must pull `logits` to numpy anyway; reusing
-  ORT output buffers as next-step inputs segfaults). See the `Decoder` docstring.
+- **Buffer-shared KV** (`decode_loop.py` `share_kv`, on by default) pre-allocates one max-length
+  OrtValue per growing KV tensor and binds past-in≡present-out so GQA writes in place (seqlens from a
+  MAX-width mask). Byte-identical, ~halves the per-step-vs-length slope → ~1.2× decode @400t on
+  Qwen3-0.6B fused, growing with context. Only the *user*-allocated-buffer IOBinding pattern works;
+  binding ORT-*allocated* output buffers back as inputs segfaults (arena recycle). Auto-disabled for
+  hybrids with fixed conv/SSM state. See the `Decoder` docstring + `experimental/buffershare/buffershare_poc.py`.
 - Code comments mark deliberate simplifications with `ponytail:`; non-obvious ORT op/precision choices
   point to `docs/ORT_QUIRKS.md` for the measured rationale.

@@ -26,7 +26,7 @@ def _worker(args):
     """Run one model and emit {"tps": [...]} on stdout. Imports kept local to the worker path."""
     from turbohead.inference.decode_loop import Decoder
     dec = Decoder(args.worker, threads=args.threads)
-    ids = dec.tok(args.prompt)["input_ids"]
+    ids = dec.encode(args.prompt)
     rates = []
     for r in range(args.reps + 1):  # 1 warmup
         _, tps = dec.generate(ids, args.max_new, temperature=args.temperature, seed=args.seed)

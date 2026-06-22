@@ -14,7 +14,28 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-      - run: uv sync
-      - run: uv run ruff check turbohead/ tests/
-      # integration tests skip themselves without the model artifact (not built in CI)
+      - run: uv sync --extra surgery        # offline toolkit (torch etc.); tests import surgery/eval
+      - run: uv run ruff check src/turbohead/ tests/
+      # build the fused custom op so test_subgraph exercises the kernel (not just the onnx chain)
+      - run: bash csrc/build.sh
+      # integration tests (real spliced model) skip themselves without the artifact, not built here
       - run: uv run pytest -q
+
+  # End-to-end smoke: build a tiny non-gated model through the whole pipeline (no dense baselines)
+  # and decode on BOTH backends. The only job that exercises the actual product end-to-end.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --extra surgery
+      - run: bash csrc/build.sh
+      - name: build flash splices for a 135M model (no dense baselines)
+        run: SKIP_DENSE=1 bash src/turbohead/surgery/build_all.sh HuggingFaceTB/SmolLM2-135M smol135m
+      - name: decode on both backends
+        run: |
+          uv run turbohead-decode artifacts/smol135m/onnx  --max-new 16
+          uv run turbohead-decode artifacts/smol135m/fused --max-new 16

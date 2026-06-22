@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build an HF model to ONNX: INT4 body, INT8 lm-head/embed, accuracy_level=4, group 128.
-# Run from repo root: MODEL=Qwen/Qwen3-0.6B bash turbohead/surgery/convert_baseline.sh
+# Run from repo root: MODEL=Qwen/Qwen3-0.6B bash src/turbohead/surgery/convert_baseline.sh
 set -euo pipefail
 
 MODEL=${MODEL:-Qwen/Qwen3-0.6B}
@@ -15,7 +15,7 @@ INT4_ALGO=${INT4_ALGO-}
 ALGO_OPT=""; [ -n "$INT4_ALGO" ] && ALGO_OPT="int4_algo_config=$INT4_ALGO"
 
 # _genai_build.py = builder + a Gemma3 rope-config compat shim (no-op for other models).
-uv run python turbohead/surgery/_genai_build.py \
+uv run python src/turbohead/surgery/_genai_build.py \
   -m "$MODEL" \
   -o "$OUT" \
   -p int4 \
