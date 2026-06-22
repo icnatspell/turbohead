@@ -121,6 +121,22 @@ end-to-end at **1.13× (tiny) / ≈1.0× (small) vs int4**.
   here is the head's runtime share (10–26% at int4). Remaining head levers (lower `P`, int4 stage-2)
   shave that slice further but give diminishing end-to-end returns; meaningful Whisper-decode speedup
   needs the *attention* attacked (KV/frame reduction), which is out of FlashHead's scope.
+- **Threads don't help flash vs int4, and erode it vs the rest.** Unpinning `intra_op_num_threads`
+  speeds the *whole* step (attention parallelizes well: tiny fused 2.76→2.19 ms 1→8t), but flash-vs-int4
+  stays noise around par at every thread count (0.90–1.15×, run-to-run spread > any thread effect), and
+  the fp32/fp16/int8 win shrinks with cores — they speed the dense baseline more than the memory-bound
+  flash head. **1 thread is flash's best framing**, same as core.
+- **Dynamic cross-attn length: trivial graph edit, parked — payoff is a separate research line.** The
+  1500 cross frames are 30s padding (a 5.9s clip is ~293 content frames of 1500), and MHA over them is
+  the real bottleneck. Making the decoder accept a variable cross length is a ~10-line ONNX dim relabel
+  (`1500 → "cross_len"` on the 24 `past_*_cross_*` inputs, **no weight re-export** — nothing bakes 1500,
+  MHA already treats it as a dynamic axis; verified it loads + runs trimmed). But *benefiting* from it
+  doesn't come free: (a) naive front-trim to 293 frames **wrecks the transcript** ("Mr Mr Qu Qu...") —
+  Whisper's encoder self-attn is global, so content isn't a sliceable prefix of the output frames; you'd
+  need VAD / attention-mass frame selection. (b) In a quick test the dynamic-shape MHA path was even
+  *slower* than static-1500 (ORT may have a faster fixed-shape kernel). So real frame reduction = a
+  correct content-selection policy + confirming ORT rewards the shorter axis — an attention method, not
+  a head one, hence out of scope here.
 - **`flash` (onnx backend) never wins** — it materializes full-V logits; only `flash-fused` (shortlist)
   is competitive, as in core.
 - **fp16 ≈ fp32 (sometimes slower)** on CPU — no fp16 matmul kernel, folds to fp32 + a Cast (ORT_QUIRKS).
