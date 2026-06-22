@@ -20,6 +20,7 @@ what shipped and what got parked. **Nothing in `turbohead/` or `csrc/` depends o
 
 | folder | what it explored | verdict |
 |---|---|---|
+| `whisper_head/` | full FlashHead on encoder-decoder ASR — whisper tiny/base/small, int4 body, 4 dense-head precisions vs 2 flash backends | **BUILT + BENCHED** — flash-fused (int8 stage-2) beats fp32/fp16 1.55–2.34×, int8 1.14–1.24×, ≈par int4 (scales w/ head share 26–68%); top-1=top-5 agree 94–97%@256 (misses are coverage not ranking). Win = head-precision × head-share (bytes), not head-share alone |
 | `multiple_assignment/` | give each token its top-r home clusters (overlapping IVF) so the tail is reachable | **GRADUATED** — `build-clusters --r 2` + sampling dedup; +1.25pp agree@256 at ~1% end-to-end TPS on int8 (the "~25%" was fp32-only; int8 dissolves it) |
 | `targeted_second_home/` | second home only for the heavy-miss tokens — bake-off vs shipped always-score | parked — dominated; captures 84% of always-score's lift but always-score is already ~free and scores higher |
 | `anisotropic_clustering/` | ScaNN-style MIPS-aware partition (penalise parallel quantization error) | **shipped as opt-in** — `build_clusters.py --eta` (default 1.0); PER-MODEL: eta=4 helps Qwen3-0.6B, regresses gemma3-270m |
