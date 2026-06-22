@@ -19,8 +19,9 @@ encoder-decoder runtime + head extraction are new here.
 - `build_whisper.py` — one model end to end: genai int4 export → extract `proj_out` → cluster →
   splice (onnx+fused) → 4 dense-head precision baselines (fp32 / fp16=head16 / int8 / int4 via core
   `quantize_head`). `uv run python experimental/whisper_head/build_whisper.py openai/whisper-small whisper_small`
-- `whisper_decode.py` — raw-ORT encoder-decoder decode loop + per-step bench (the harness
-  `decode_loop.py` doesn't cover: cross-KV has no `present`, int32 ids, encoder pass, no attn mask).
+- `whisper_decode.py` — raw-ORT encoder-decoder decode loop + per-step bench + `--profile` (ORT
+  op-level breakdown, head/flash vs body). `decode_loop.py` can't drive Whisper: cross-KV has no
+  `present`, int32 ids, an encoder pass, no attn mask.
 - `sweep.py` — benches all 6 head variants × all built models into one table (one subprocess per
   variant — two custom-op `.so` in a process segfault, same as `turbohead-bench`).
 
@@ -34,9 +35,11 @@ encoder-decoder runtime + head extraction are new here.
 | whisper-base  | 512 | 6  | **51.3%** | 95.0% | 95.0% |
 | whisper-small | 768 | 12 | **26.0%** | 94.5% | 94.5% |
 
-Encoder runs once (amortized); share = head / (head + decoder-per-step), the memory-bound M=1 proxy.
-Agreement = recall of the dense-fp32-head argmax on real hidden states (sweep `-P` 128→512 lifts it:
-small goes 89.0 → 94.5 → 97.4 → 99.0%).
+Encoder runs once (amortized); share = head / (head + decoder-per-step), a *parameter*-count proxy at
+**fp32-equivalent**. ⚠️ This badly overstates the head's *runtime* weight on an int4 deploy — the
+op-level profile below shows the head is only 10–26% of the actual step (int4 shrinks it 8×, and
+cross-attention dominates wall-clock). Agreement = recall of the dense-fp32-head argmax on real hidden
+states (sweep `-P` 128→512 lifts it: small goes 89.0 → 94.5 → 97.4 → 99.0%).
 
 **top-5 == top-1 in every row, exactly.** Not a bug: FlashHead misses are *coverage* misses — when the
 true token's cluster isn't in the top-P probed set it isn't scored at all, so it's absent from the whole
@@ -66,6 +69,35 @@ stage-2 default it reads *more* bytes than the int4 head and loses to it (tiny 0
 (±several % run-to-run; the ≈1.0× int4 column shouldn't be over-read — small's int4 baseline swung
 14.5→12.7 ms across runs. fp32/fp16/int8 are all clear wins.)
 
+### Op-level profile — where a decoder step actually goes (`--profile`, int4 body, 50 steps, 1 thread)
+
+`uv run python experimental/whisper_head/whisper_decode.py <dir> --decoder model.onnx --profile`
+
+**whisper-small** (~14.7 ms/step):
+
+| op | dense int4 head | flash-fused |
+|---|---|---|
+| **MultiHeadAttention** (self + cross-attn ×12) | 8.33 ms (**58%**) | 8.49 ms (**62%**) |
+| body MatMulNBits (q/k/v/o, fc1/fc2 ×12) | 4.15 ms (29%) | 3.74 ms (27%) |
+| **head** (lm_head / FlashHeadSelectQ8 + stage-1) | 1.41 ms (**10%**) | 1.01 ms (**7%**) |
+| norms + gelu | ~0.4 ms (3%) | ~0.4 ms (3%) |
+
+**whisper-tiny** (~3.2 ms/step):
+
+| op | dense int4 head | flash-fused |
+|---|---|---|
+| MultiHeadAttention | 1.47 ms (52%) | 1.34 ms (53%) |
+| **head** | 0.75 ms (**26%**) | 0.58 ms (**23%**) |
+| body MatMulNBits | 0.47 ms (16%) | 0.45 ms (18%) |
+| stage-1 gemv + TopK | — | 0.045 ms (~2%) |
+
+**Runtime head share is 10% (small) / 26% (tiny) — far below the 26%/68% *param* share above.** Two
+reasons the param proxy misleads: int4 shrinks the head to 0.5 byte/param, and **`MultiHeadAttention`
+dominates (52–62%)** because Whisper's decoder cross-attends over **1500 encoder frames every layer** —
+heavy compute the param count never sees. FlashHead *does* speed the head **1.3–1.4× as a component**
+(small 1.41→1.01 ms, tiny 0.75→0.58 ms, reading 8 MB vs 20 MB), but Amdahl on a 10–26% slice caps
+end-to-end at **1.13× (tiny) / ≈1.0× (small) vs int4**.
+
 ## Findings
 
 - **The win is bytes-saved, = head-precision × head-share, NOT head-share alone.** Speed at M=1 is
@@ -84,6 +116,11 @@ stage-2 default it reads *more* bytes than the int4 head and loses to it (tiny 0
 - **int8 stage-2 is essential to even reach par vs int4.** With the fp32 stage-2 default, flash-fused
   reads `P·cap·D·4` ≈ 16 MB — *more* than the whole int4 head (10 MB) — and loses (tiny 0.84×). int8
   stage-2 (`FlashHeadSelectQ8`) quarters that to ~4 MB; build_whisper now defaults fused to int8.
+- **The head is NOT the Whisper decode bottleneck — attention is** (`MultiHeadAttention` 52–62% of the
+  step, cross-attending 1500 encoder frames × every layer). FlashHead is a head method, so its ceiling
+  here is the head's runtime share (10–26% at int4). Remaining head levers (lower `P`, int4 stage-2)
+  shave that slice further but give diminishing end-to-end returns; meaningful Whisper-decode speedup
+  needs the *attention* attacked (KV/frame reduction), which is out of FlashHead's scope.
 - **`flash` (onnx backend) never wins** — it materializes full-V logits; only `flash-fused` (shortlist)
   is competitive, as in core.
 - **fp16 ≈ fp32 (sometimes slower)** on CPU — no fp16 matmul kernel, folds to fp32 + a Cast (ORT_QUIRKS).
@@ -104,4 +141,5 @@ uv run python experimental/whisper_head/sweep.py                                
 New *model target*, not a method lever. To graduate: fold the encoder-decoder feed path into core
 `decode_loop.py` (cross-KV-from-encoder + int32 ids + mel front-end) and a Whisper branch in the export,
 then add whisper-* to `build_all.sh` + the RESULTS sweep. Worth it for fp32/fp16/int8-head deploys
-(1.14–2.34×); against an int4-everything deploy it's ≈par, so not compelling there.
+(1.14–2.34×); against an int4-everything deploy it's ≈par (head is only 10–26% of the runtime step,
+attention dominates), so not compelling there. Best fit: tiny/base + a non-int4 head.
