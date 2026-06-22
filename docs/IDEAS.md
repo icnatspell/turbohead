@@ -1,0 +1,222 @@
+# Ideas to improve FlashHead
+
+Directions worth exploring, grouped by which part of the method they attack. Written so a junior
+ML engineer with no prior exposure can follow it: shared terms are defined once below, and each
+idea explains its own jargon. For more background, `RELATED.md` explains how FlashHead compares to
+other methods, `THESIS_ADAPTIVE_PROBING.md` covers the two stages in depth, and
+`DIFFERENCE_OURS_VS_FLASHEAD.md` covers the clustering internals.
+
+## Background: what FlashHead does, in two stages
+
+A language model ends with a **head**: it takes the model's hidden state `h` (a vector of length
+`D`) and produces one score, a **logit**, for each of the `V` vocabulary tokens. A token's logit is
+just its embedding row dotted with `h`. Normally this means one big matrix-vector multiply (a
+**gemv**) over all `V` tokens, which is slow because `V` is large (about 152,000 for Qwen3-0.6B).
+
+FlashHead avoids scoring all `V` tokens by grouping them into `K` clusters offline (`K=9496` for
+Qwen3-0.6B), each holding `cap` tokens (`cap=16`). At decode time it runs two stages:
+
+- **Stage 1 (routing):** score `h` against all `K` cluster centroids (`sims = C·h`) and keep the
+  top `P` clusters. This always scans all `K` centroids, so its cost does not depend on `P`. It is
+  the floor on how fast the head can get.
+- **Stage 2 (refine):** take the `P·cap` tokens inside those `P` clusters, compute their exact
+  logits, and return the best one. Its cost grows with `P`.
+
+Most prior work (adaptive probing) shrinks stage 2 by using a smaller `P`. The most under-explored
+lever is stage 1.
+
+## Terms used throughout
+
+- **top-1 / agreement:** did the fast method pick the *same single best token* as the exact
+  full-`V` head? This is the headline quality metric. "agree@256" means agreement when `P=256`.
+- **required-P:** for a given token, the smallest `P` that would have included its true cluster in
+  the top-`P` routed clusters. If the true cluster ranks 5th among the `K` centroids, required-P is
+  5. Smaller is easier. Because stage 2 is exact, FlashHead gets the token right exactly when `P`
+  is at least its required-P.
+- **percentiles (p50, p90, p99):** the value below which that fraction of tokens fall. p50 (the
+  median) of required-P being 5 means half the tokens need `P` of 5 or less; p99 of 1165 means the
+  hardest 1% need `P` above 1165. A big gap between p50 and p99 is a "heavy tail": most tokens easy,
+  a few very hard.
+- **cosine vs inner product:** stage 1 ranks clusters by *cosine* similarity, which compares only
+  the *direction* of two vectors (it normalizes away their length). The true target is the largest
+  *inner product* (raw dot, which keeps length). Searching for the largest inner product is called
+  **MIPS** (maximum inner product search).
+- **perplexity (PPL):** a standard measure of how well the model predicts held-out text. It is the
+  exponential of the average negative log-probability the model assigns to the true next tokens.
+  Lower is better; assigning near-zero probability to a true token sends PPL toward infinity.
+- **softmax, Z, numerator:** to turn logits into probabilities you exponentiate each and divide by
+  their sum. That sum is the denominator `Z` (the "partition function"); the chosen token's
+  exponentiated logit is the numerator. If you only score some tokens, `Z` is wrong (too small) and
+  unscored tokens get probability ~0.
+- **nat:** the unit of log-probability when using natural log. A gap of 11 nats means one
+  probability is `e^11` (about 60,000x) larger than another.
+
+## Attacks the stage-1 floor
+
+### 1. Hierarchical / coarse-to-fine routing
+
+Today stage 1 is one flat matmul over all `K` centroids. That cost grows as you add clusters, and
+the paper scales `K` into the tens of thousands. The idea: cluster the centroids *themselves* into
+about `√K` "super-centroids", then route in two cheap steps. First score the super-centroids,
+descend into the winning few, then score only the leaf centroids underneath them. Stage 1 work
+drops from roughly `K·D` to roughly `√K·D`. (This is the "inverted-multi-index" trick from
+nearest-neighbor search, applied one level up.) It is the only lever that lowers the stage-1 floor,
+which adaptive probing cannot touch, and it matters most exactly where the paper is heading (large
+`K`).
+
+**POC result: tested, not worth it in the naive form.** See `logs/hierarchical_stage1_poc.py`.
+On Qwen3-0.6B (4000 WikiText-2 positions, flat baseline agreement at P=256 is 96.8%):
+
+- Single-assignment 2-level routing (each leaf belongs to exactly one super-centroid): `M=64`
+  super-centroids, probing `m=8` of them, cuts stage 1 by about 13x but agreement drops to 59%.
+- Soft assignment (each leaf belongs to its top-`r` super-centroids) helps but not enough. The
+  best operating point, `M=100`, `r=3`, `m=16`, gets 4.6x reduction at 75% agreement.
+
+Two findings explain why:
+
+1. **Recall is the wall.** "Reachable" means the true cluster's super-centroid made the top-`m`, so
+   the true cluster is still in play after the coarse prune. Across every setting `agree@256 ≈
+   reachable`: once the true super-centroid survives, the leaf ranking succeeds; the coarse prune
+   itself is what drops the true cluster. Pushing reachability near 100% needs probing so many
+   super-centroids that the savings vanish.
+2. **The heavy tail that makes adaptive probing attractive is what breaks this.** The true cluster
+   often sits deep in the flat order (p90=80, p99=1165, from the adaptive-probing analysis). A
+   coarse first level cannot keep a flat-rank-500 cluster in its top few super-centroids, so it
+   prunes exactly the hard tokens.
+
+On top of that, stage 1 on Qwen3-0.6B is about 0.35 ms, only 1.6% of a decode step, so even a
+working 30x reduction would be near-invisible end-to-end. Hierarchical stage-1 only pays off at
+very large `K`, and only if the coarse level is made nearly lossless (a learned coarse quantizer,
+or super-centroids fit to maximize reachability rather than plain cosine k-means). High bar, small
+payoff. Parked.
+
+### 2. Product-quantized centroids for stage 1
+
+Stage 1 is limited by reading the `K·D` centroid matrix from memory. **Product quantization**
+compresses each vector by splitting it into chunks and replacing each chunk with the id of a nearby
+entry in a small prototype table, so the routing read shrinks. Alternatively, low-rank the centroid
+matrix. Smaller win than hierarchical, but it stacks with it and with the int4-quantized stage 1
+already in use.
+
+## Cheap to test, could lower required-P directly
+
+### 3. MIPS-aware cluster ranking (a one-array swap)
+
+Stage 1 ranks clusters by cosine similarity (normalized centroid dotted with `h`). The actual
+target is the cluster containing `argmax(e·h)`, a raw inner product. Normalizing the centroid
+throws away the embedding's length, and in MIPS that length is part of what signals a cluster might
+hold a high-scoring token. So test ranking by the unnormalized mean embedding, or by the mean plus
+a per-cluster correction based on its radius or its largest-norm member. This is the same shape as
+the data-aware routing prototype: swap the routing matrix, recompute required-P on the same hidden
+states. Fast to falsify and grounded in standard MIPS theory.
+
+**POC result: tested, no win.** See `logs/mips_routing_poc.py`. Same 4000 WikiText-2 positions,
+cosine baseline top-1 agreement at P=256 is 96.8%. Three routing swaps, with the cluster groups
+held fixed (only the ranking score changes). Lower required-P is better:
+
+| routing | p50 | p99 | mean rank | agree@256 |
+|---|---|---|---|---|
+| cosine (baseline) | 5 | 1165 | 75.7 | **96.8%** |
+| raw mean (`mu·h`, unnormalized) | 4 | 1110 | 71.8 | 95.8% |
+| `mu·h + ‖h‖·radius` (MIPS bound) | 4268 | 8824 | 4107 | 13.2% |
+| `mu·h + ‖h‖·maxnorm` | 4005 | 9177 | 4110 | 11.6% |
+
+The norm-bound variants are catastrophic: the radius term (`‖h‖·radius`, an upper bound on how high
+a cluster member could score) swamps the actual `mu·h` term, so they end up sorting clusters by
+radius and ignoring `h`. A small-coefficient sweep (`mu·h + a·‖h‖·radius`) finds a marginal tail
+gain at `a=0.01` (p99 drops 1165 to 977, mean 75.7 to 68.6) but agree@256 still tops out at 96.2%,
+under the cosine baseline.
+
+Why cosine wins: the equal-size balanced clusters have similar radii, so the norm/radius MIPS
+signal carries little distinguishing information and only adds noise. The embeddings sit near a
+shared length scale, so cosine is already close to inner product for ranking, minus the harmful
+length noise. The inner-product framing nudges the median (p50 4 vs 5) but loses the metric that
+matters (top-1). Parked.
+
+## Improves fidelity, not speed
+
+### 4. Coverage-corrected probabilities
+
+Today a true token sitting in a cluster FlashHead did not probe gets a logit of `-1e9`, so its
+probability is about zero. That caps perplexity (assigning ~0 probability to a real token blows up
+PPL) and distorts sampling. The fix: each stage-1 centroid score is a stand-in for its cluster's
+total probability mass, so add an analytic correction for the unprobed clusters to keep the softmax
+denominator `Z` honest, without scoring all `V` tokens. This makes likelihood and sampling
+first-class instead of needing the Monte-Carlo workaround the paper uses.
+
+**POC result: tested, clear win on the part that matters.** See `logs/coverage_correction_poc.py`.
+Qwen3-0.6B, 1000 WikiText-2 positions, with the genuine corpus next-token as the target (not the
+model's own argmax, which would almost always be probed and hide the problem), `P=256`. At `P=256`,
+11.2% of real next-tokens land in an unprobed cluster, so the hole is material.
+
+| method | PPL | unprobed-only PPL |
+|---|---|---|
+| gold (full-`V` softmax) | 11.1 | 1640 |
+| truncated (current FlashHead) | **10277** | ~1e30 |
+| corrected `Z` + cluster-mean numerator (fully deployable, token unknown) | 33.1 | 5.6e7 |
+| corrected `Z` + exact single-token logit (token known) | **9.76** | 1026 |
+
+Two findings:
+
+1. **The denominator fix is the real, cheap, robust win.** Add `cap · Σ exp(mean-logit_k)` over the
+   unprobed clusters to the softmax denominator `Z`, where a cluster's mean-logit is `mu_k · h`
+   (its mean embedding dotted with `h`). That costs one extra stage-1-sized gemv, or nothing extra
+   if you store a per-cluster norm and reuse the stage-1 cosine scores. With that corrected `Z` and
+   the true token's *exact* logit, PPL is 9.76, matching gold's 11.1. The current method's 10277
+   was unusable for likelihood; this makes likelihood first-class.
+
+2. **Estimating an *unknown* unprobed token's own logit from cluster aggregates fails.** Using the
+   cluster mean (33.1) or the cosine score times a typical member norm (33.0) both underestimate by
+   about 11 nats: a token the corpus actually chose sits far above its cluster's average member. A
+   single global offset can match the PPL *number*, but only as an averaging artifact (individual
+   per-token probabilities stay biased). So for free-running sampling, use the corrected `Z` (which
+   fixes the over-confidence on the probed tokens) and sample the unprobed tail by cluster mean
+   mass; do not trust individual unprobed-token probabilities.
+
+**Where this pays off directly:** any path where the token is known. That includes PPL/likelihood
+evaluation, and the speculative-decoding acceptance test (#5 below, and `RELATED.md`, needs
+`P(drafted token)` for specific known tokens). Score those exact logits and add the corrected `Z`:
+calibrated, gold-quality, with no full-`V` softmax. This unblocks the speculative-decoding
+composition.
+
+**Overhead applies only when the head emits probabilities** (sampling, PPL, the spec-decode
+acceptance test). Greedy argmax decoding, the fused default, never builds a softmax, so the tail
+term is never computed and the correction costs nothing there. When probabilities are needed, the
+added work is the unprobed-cluster tail (`Σ exp(mean-logit)` over the `K` clusters), which is one
+extra stage-1-sized gemv (`mu·h`) plus an `O(K)` exponentiate-and-sum, or just the `O(K)`
+exponentiate-and-sum if the per-cluster norms are stored and the stage-1 cosine scores are reused.
+
+## Concrete realization of adaptive probing
+
+### 5. Cascade probing
+
+Instead of predicting the right `P` up front, probe a small `P` first, check the confidence gap
+between the top two refined logits, and re-probe with more clusters only when that gap is small.
+Stage 1 already ran, so the second pass is just extra gathers in stage 2. This sidesteps the hard
+"can we predict required-P" question by measuring uncertainty after a cheap first look. A low-risk
+variant of the adaptive-probing thesis.
+
+## Not worth it
+
+- **Variable cluster size by token importance.** Fights the equal-size kernel requirement (the
+  inference kernel gathers rows with plain arithmetic only because every cluster has the same `cap`
+  tokens), and the paper's own ablation (their Table 6) shows equal clusters beat unequal ones.
+- **Caching cluster rankings across decode steps.** The hidden state `h` moves too much from one
+  token to the next for reusing a previous step's ranking to pay off.
+
+## Suggested order
+
+1. Cascade probing (low-risk variant of adaptive probing). Untested.
+
+Done, positive: coverage correction (#4). Corrected-`Z` likelihood matches gold PPL (10277 down to
+9.76) when the token is known, which unblocks PPL evaluation and the spec-decode acceptance test.
+Promote to implementation: store the per-cluster mean-logit norms in the npz, and add the tail term
+where the head emits probabilities.
+
+Parked: MIPS-aware ranking (#3), because the POC showed cosine already beats every inner-product
+and norm-bound routing on top-1. Hierarchical stage-1 (#1), because the POC showed it is
+recall-bound and only relevant at very large `K`. Product-quantized centroids (#2), a small win
+that is only useful stacked on a working #1.
+
+Related external methods (graph indices, learned routing, and others) and how they compare live in
+`RELATED.md`.
