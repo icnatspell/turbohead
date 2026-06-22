@@ -25,6 +25,7 @@ surgery = [
     "safetensors>=0.8.0",
     "torch>=2.12.0",
     "datasets>=5.0.0",
+    "soundfile>=0.12",  # decode librispeech audio for the whisper_head experiment's gate
 ]
 
 # `uv run turbohead-<x>` instead of `uv run python turbohead/.../<x>.py`.
