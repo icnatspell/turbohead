@@ -31,7 +31,7 @@ def test_hybrid_model_decodes():
     """Hybrid model (interleaved conv + sparse-index attention layers) decodes via the generic
     state path — regression guard for the past_conv.* / past_key_values.N.* seeding + remap."""
     dec = Decoder(HYBRID, threads=1)
-    out, tps = dec.generate(dec.tok("Once upon a time,")["input_ids"], max_new=8)
+    out, tps = dec.generate(dec.encode("Once upon a time,"), max_new=8)
     assert out and tps > 0
 
 
@@ -41,7 +41,7 @@ def test_embeds_in_model_decodes():
     position_ids decodes — regression guard for the embeds-in feed path."""
     dec = Decoder(EMBEDS, threads=1)
     assert dec.embeds_in and dec.pos_rank == 3
-    out, tps = dec.generate(dec.tok("Once upon a time,")["input_ids"], max_new=8)
+    out, tps = dec.generate(dec.encode("Once upon a time,"), max_new=8)
     assert out and tps > 0
 
 
@@ -58,12 +58,12 @@ def test_fused_greedy_matches_onnx(dec):
     Gate measured 100% over 12 prompts x 128 tokens incl. -ffast-math; a couple here guard it."""
     fused = Decoder(FUSED, threads=1)
     for p in ("Once upon a time, in a small village,", "def fibonacci(n):"):
-        ids = dec.tok(p)["input_ids"]
+        ids = dec.encode(p)
         assert dec.generate(ids, max_new=32)[0] == fused.generate(ids, max_new=32)[0]
 
 
 def test_greedy_is_deterministic_and_nonempty(dec):
-    ids = dec.tok("Once upon a time,")["input_ids"]
+    ids = dec.encode("Once upon a time,")
     out1, tps = dec.generate(ids, max_new=8)
     out2, _ = dec.generate(ids, max_new=8)
     assert out1 and out1 == out2   # greedy: same prompt -> same tokens
@@ -71,7 +71,7 @@ def test_greedy_is_deterministic_and_nonempty(dec):
 
 
 def test_sampling_seed_reproducible(dec):
-    ids = dec.tok("Once upon a time,")["input_ids"]
+    ids = dec.encode("Once upon a time,")
     a, _ = dec.generate(ids, max_new=8, temperature=0.8, seed=1)
     b, _ = dec.generate(ids, max_new=8, temperature=0.8, seed=1)
     assert a == b
@@ -82,8 +82,8 @@ def test_reprefill_resets_shared_cache(dec):
     """The eviction mechanism: re-prefilling a short window B into a buffer that held longer text A
     must give byte-identical head output to a FRESH prefill of B — proving the slide overwrites
     from slot 0 and the stale A slots beyond B are masked out (no leakage, no per-model RoPE)."""
-    a = dec.tok("The quick brown fox jumps over the lazy dog near the wide river bank.")["input_ids"]
-    b = dec.tok("A short sentence.")["input_ids"]
+    a = dec.encode("The quick brown fox jumps over the lazy dog near the wide river bank.")
+    b = dec.encode("A short sentence.")
     cap = len(a) + 4
     d1 = Decoder(MODEL, threads=1, max_kv=cap)
     d1._setup_shared(cap)
@@ -98,7 +98,7 @@ def test_reprefill_resets_shared_cache(dec):
 
 def test_sliding_window_generates_past_cap(dec):
     """A fixed max_kv smaller than prompt+max_new must keep generating (slide), not stop early."""
-    ids = dec.tok("Once upon a time, in a small village, there lived")["input_ids"]
+    ids = dec.encode("Once upon a time, in a small village, there lived")
     cap = len(ids) + 8                                          # only 8 spare decode slots
     out, tps = Decoder(MODEL, threads=1, max_kv=cap).generate(ids, max_new=40)
     assert len(out) > cap - len(ids) and tps > 0               # went past the buffer's spare room
@@ -107,7 +107,7 @@ def test_sliding_window_generates_past_cap(dec):
 def test_sliding_prefix_matches_full_context(dec):
     """Until the buffer first fills, the sliding decoder still holds the whole context, so its
     greedy output is identical to a full-context run; they diverge only once eviction starts."""
-    ids = dec.tok("Once upon a time, in a small village,")["input_ids"]
+    ids = dec.encode("Once upon a time, in a small village,")
     cap = len(ids) + 8
     full = dec.generate(ids, max_new=40)[0]                     # dec: no max_kv -> never slides
     slid = Decoder(MODEL, threads=1, max_kv=cap).generate(ids, max_new=40)[0]

@@ -65,7 +65,7 @@ baseline → head weight → clusters → 4 dense-head variants → 2 flash spli
 bench/eval commands:
 
 ```bash
-bash turbohead/surgery/build_all.sh <hf-model> <slug> [cap=16] [P=256]
+bash src/turbohead/surgery/build_all.sh <hf-model> <slug> [cap=16] [P=256]
 ```
 
 `<slug>` is a dir-safe name; everything for the model lives under `artifacts/<slug>/`:
@@ -99,7 +99,7 @@ unless `FORCE=1`. Per-model command blocks are listed in each section.
 V=151936, D=1024, 28 layers. FlashHead: cap=16, K=9496, P=256. Reference PPL (fp32 head) = 13.046.
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b
 R=artifacts/qwen3_0_6b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -167,7 +167,7 @@ build_all auto-falls back). Tiny D + huge V + few layers ⇒ the head dominates 
 edge is far larger than on Qwen3-0.6B.
 
 ```bash
-bash turbohead/surgery/build_all.sh google/gemma-3-270m gemma3_270m
+bash src/turbohead/surgery/build_all.sh google/gemma-3-270m gemma3_270m
 R=artifacts/gemma3_270m
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -229,7 +229,7 @@ Int4 body = RTN (k_quant_last reshape-crashes; auto-fallback). Same 262k vocab a
 hidden + more layers, so the head is a smaller share than 270M → smaller (but still large) flash win.
 
 ```bash
-bash turbohead/surgery/build_all.sh google/gemma-3-1b-pt gemma3_1b
+bash src/turbohead/surgery/build_all.sh google/gemma-3-1b-pt gemma3_1b
 R=artifacts/gemma3_1b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -290,7 +290,7 @@ Int4 body = RTN. Wide hidden (2048) + smaller vocab ⇒ head is a relatively sma
 win is the most modest of the set (similar to Qwen).
 
 ```bash
-bash turbohead/surgery/build_all.sh meta-llama/Llama-3.2-1B llama3_2_1b
+bash src/turbohead/surgery/build_all.sh meta-llama/Llama-3.2-1B llama3_2_1b
 R=artifacts/llama3_2_1b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -349,7 +349,7 @@ Int4 body = RTN. Wide hidden (2048) + the most layers of the set ⇒ smallest he
 win is the most modest measured (just under Llama, which shares D=2048 but has fewer layers).
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3-1.7B qwen3_1_7b
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3-1.7B qwen3_1_7b
 R=artifacts/qwen3_1_7b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -415,7 +415,7 @@ numpy from the tied embedding (`head_W`) and builds the 3-D position_ids itself 
 so it benches end-to-end despite the hybrid SSM state. (Earlier this model was quality-only.)
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3.5-0.8B qwen3_5_0_8b
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3.5-0.8B qwen3_5_0_8b
 R=artifacts/qwen3_5_0_8b
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -476,7 +476,7 @@ so the flash win is the smallest of the set and even dense quant heads are compe
 noisier here than for the larger models (a fast ~20 ms/step model amplifies run-to-run variance).
 
 ```bash
-bash turbohead/surgery/build_all.sh h2oai/h2o-danube3-500m-chat danube3_500m
+bash src/turbohead/surgery/build_all.sh h2oai/h2o-danube3-500m-chat danube3_500m
 R=artifacts/danube3_500m
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy
@@ -561,7 +561,7 @@ cap=16, K=4096, P=256. LiquidAI hybrid — most layers are short convolutions wi
 it benches end-to-end — unlike Qwen3.5-0.8B, which splits the embedding out.
 
 ```bash
-bash turbohead/surgery/build_all.sh LiquidAI/LFM2.5-350M lfm2_5_350m
+bash src/turbohead/surgery/build_all.sh LiquidAI/LFM2.5-350M lfm2_5_350m
 R=artifacts/lfm2_5_350m
 uv run turbohead-bench $R/head16 $R/head8g128 $R/head4g128 $R/head4g32 $R/onnx $R/fused \
     --threads 1,2,4,8 --reps 7                              # greedy

@@ -16,7 +16,7 @@ Three graph-output shapes, auto-detected from the graph's outputs:
 Doubles as the profiler (--profile): per-op decode-step breakdown via ORT profiling.
 
 CLI:
-  uv run python turbohead/inference/decode_loop.py <model_dir> [opts]
+  uv run python src/turbohead/inference/decode_loop.py <model_dir> [opts]
     --threads N    intra-op threads (default 1)
     --max-new M    tokens to generate (default 64)
     --reps R       benchmark: median tok/s over R timed runs (default 1 = single run)
@@ -34,7 +34,7 @@ import argparse
 import collections
 import numpy as np
 import onnxruntime as ort
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
 from loguru import logger
 
 DEFAULT_PROMPT = "Once upon a time, in a small village,"
@@ -92,11 +92,17 @@ class Decoder:
         self.out_names = [o.name for o in self.sess.get_outputs()]
         self.in_names = {i.name for i in self.sess.get_inputs()}
 
-        # Tokenizer + EOS ship with the model (splice copies them) — no hardcoded identity.
-        self.tok = AutoTokenizer.from_pretrained(self.dir)
-        eos = json.load(open(f"{self.dir}/genai_config.json"))["model"].get(
-            "eos_token_id", self.tok.eos_token_id)
-        self.eos = set(eos) if isinstance(eos, list) else {eos}
+        # Tokenizer + EOS ship with the model (splice copies them) — no hardcoded identity. The deploy
+        # path uses raw `tokenizers` (no transformers/torch); tokenizer.json is the only file it needs.
+        self.tok = Tokenizer.from_file(f"{self.dir}/tokenizer.json")
+        # EOS: genai_config (the pipeline always writes it); fall back to tokenizer_config's eos_token.
+        eos = json.load(open(f"{self.dir}/genai_config.json"))["model"].get("eos_token_id")
+        if eos is None:
+            tc = json.load(open(f"{self.dir}/tokenizer_config.json"))
+            et = tc.get("eos_token")
+            et = et.get("content") if isinstance(et, dict) else et
+            eos = self.tok.token_to_id(et) if et else None
+        self.eos = set(eos) if isinstance(eos, list) else ({eos} if eos is not None else set())
 
         # State inputs: KV cache and/or SSM conv/recurrent state. Discovered generically by name
         # so hybrid models work — attention layers interleaved with conv/recurrent layers, at
@@ -155,6 +161,12 @@ class Decoder:
         self.token_out = ("logits" if self.contract == "logits-out"
                           else None if self.contract == "shortlist-out"
                           else next(n for n in self.out_names if not n.startswith("present.")))
+
+    def encode(self, text):
+        return self.tok.encode(text).ids
+
+    def decode(self, ids):
+        return self.tok.decode(ids)
 
     @staticmethod
     def _slide_keep(cap):
@@ -360,7 +372,7 @@ def main():
     a = ap.parse_args()
 
     dec = Decoder(a.model_dir, a.threads, a.profile, share_kv=not a.no_share_kv, max_kv=a.max_kv)
-    ids = dec.tok(a.prompt)["input_ids"]
+    ids = dec.encode(a.prompt)
     logger.info(f"{a.model_dir} | backend {dec.backend} ({dec.contract}) | "
                 f"{dec.n_layers}L kv_heads={dec.kv_heads} head_size={dec.head_size} | "
                 f"threads={a.threads} | temp={a.temperature} | share_kv={dec.share_kv}")
@@ -373,7 +385,7 @@ def main():
     import statistics
     logger.info(f"decode {statistics.median(rates):.1f} tok/s "
                 f"(median of {len(rates)}) | {len(out)} toks")
-    logger.info(f"  -> {dec.tok.decode(out)!r}")
+    logger.info(f"  -> {dec.decode(out)!r}")
     assert out and out[0] != ids[-1], "decode produced nothing sane"
 
     if a.profile:

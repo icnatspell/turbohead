@@ -6,7 +6,7 @@ runs each iteration faster than a CPU, so the gap is not hardware. We do less wo
 make different algorithm choices. This doc records what differs, why we are still fast, what
 it costs in quality, and which knobs raise top-1 agreement.
 
-Written for a junior engineer. Read `turbohead/surgery/build_clusters.py` alongside it.
+Written for a junior engineer. Read `src/turbohead/surgery/build_clusters.py` alongside it.
 
 ## The headline: iteration budget
 

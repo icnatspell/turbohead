@@ -27,9 +27,9 @@ decode loop to run it, and gates to measure quality and speed.
 
 | path | what |
 |---|---|
-| `turbohead/surgery/` | **offline** — apply the method. `build_all.sh` (one-command pipeline), `build_clusters.py` (balanced k-means), `build_subgraph.py` (the op-chain), `splice.py`, `quantize_head.py` (dense baselines) |
-| `turbohead/inference/decode_loop.py` | **deploy** — the only file needed to *run* a spliced model (raw ORT + numpy + tokenizer; also the profiler). Drives standard, hybrid, and embeds-in models |
-| `turbohead/eval/` | **gates** — `benchmark.py` (speed matrix), `head_quality.py` (agreement/PPL), `agreement.py`/`ppl.py` (spot-checks) |
+| `src/turbohead/surgery/` | **offline** — apply the method. `build_all.sh` (one-command pipeline), `build_clusters.py` (balanced k-means), `build_subgraph.py` (the op-chain), `splice.py`, `quantize_head.py` (dense baselines) |
+| `src/turbohead/inference/decode_loop.py` | **deploy** — the only file needed to *run* a spliced model (raw ORT + numpy + tokenizer; also the profiler). Drives standard, hybrid, and embeds-in models |
+| `src/turbohead/eval/` | **gates** — `benchmark.py` (speed matrix), `head_quality.py` (agreement/PPL), `agreement.py`/`ppl.py` (spot-checks) |
 | `csrc/turbohead_op.cc` | the fused stage-2 custom CPU op (`build.sh` → `libturbohead.so`) |
 | `docs/RESULTS.md` | **the numbers** — 8-model speed×quality matrix, key findings, per-model reproduce commands, open items |
 | `docs/ORT_QUIRKS.md` | measured ONNXRuntime CPU operator quirks (the *why* behind the precision/op choices) |
@@ -39,13 +39,19 @@ decode loop to run it, and gates to measure quality and speed.
 
 ## Install
 
+Deps are split so deploying a spliced model doesn't drag in torch:
+
 ```bash
-uv sync
-# or:  pip install turbohead
+uv sync                  # deploy path only: onnxruntime + numpy + tokenizers (run a spliced model)
+uv sync --extra surgery  # + offline toolkit (torch, onnx, genai, datasets): apply the method + measure
 ```
 
-One install gives you the full toolkit (onnx, torch, datasets): apply the method, run it, and
-measure it. The `dev` group adds ruff, pytest, and pyrefly for contributors.
+`pip install "turbohead[surgery]"` is the equivalent once published (not yet on PyPI). The `dev`
+group adds ruff, pytest, and pyrefly for contributors.
+
+The **`fused` backend ships a C++ custom op** (`libturbohead.so`). It is **not portable** — build it
+on the machine you deploy to (`bash csrc/build.sh`, compiled `-march=native`). The `onnx` backend is
+pure-ORT and needs no `.so`.
 
 ## Usage
 
@@ -56,7 +62,7 @@ the whole artifact tree for a model — int4 baseline → head weight → cluste
 two flash splices (portable `onnx`, fused custom-op `fused`) — into its own reusable `artifacts/<slug>/`:
 
 ```bash
-bash turbohead/surgery/build_all.sh <hf-model> <slug>      # e.g. Qwen/Qwen3-0.6B qwen3_0_6b
+bash src/turbohead/surgery/build_all.sh <hf-model> <slug>      # e.g. Qwen/Qwen3-0.6B qwen3_0_6b
 # -> artifacts/<slug>/{baseline, head_W.npy, clusters.npz, head{16,8g128,4g128,4g32}, onnx, fused, logs}
 ```
 
@@ -70,7 +76,7 @@ body defaults to plain RTN (robust across architectures). Then run / measure wit
 ```bash
 R=artifacts/qwen3_0_6b
 # 1. int4 baseline ONNX (genai model builder)
-MODEL=Qwen/Qwen3-0.6B OUT=$R/baseline bash turbohead/surgery/convert_baseline.sh
+MODEL=Qwen/Qwen3-0.6B OUT=$R/baseline bash src/turbohead/surgery/convert_baseline.sh
 # 2. dump the fp32 head weight (= tied embedding)
 uv run turbohead-extract-head   --model Qwen/Qwen3-0.6B --out $R/head_W.npy
 # 3. balanced k-means clustering assets        (cap=16; or --cap 32 / --clusters K)

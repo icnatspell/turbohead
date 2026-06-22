@@ -4,8 +4,11 @@
 # weight -> clusters -> 4 dense-head variants + 2 flash splices (onnx logits-out, fused shortlist-out).
 # Then bench/eval with the commands printed at the end.
 #
-#   bash turbohead/surgery/build_all.sh <hf-model> <slug> [cap] [P]
-#   bash turbohead/surgery/build_all.sh Qwen/Qwen3-1.7B qwen3_1_7b
+#   bash src/turbohead/surgery/build_all.sh <hf-model> <slug> [cap] [P]
+#   bash src/turbohead/surgery/build_all.sh Qwen/Qwen3-1.7B qwen3_1_7b
+#
+# SKIP_DENSE=1 skips the 4 dense-head baselines (the comparison points) and builds only the flash
+# splices + their inputs — the actual product. Used by the CI end-to-end smoke test.
 #
 # Layout: artifacts/<slug>/{baseline, head_W.npy, clusters.npz, head16, head8g128, head4g128,
 #         head4g32, onnx, fused}.
@@ -33,7 +36,7 @@ echo "$MODEL" > "$ROOT/hf_model_id.txt"   # makes the artifact dir self-describi
 
 if [ "${FORCE:-0}" = 1 ] || [ ! -f "$BASE/model.onnx" ]; then
   rm -rf "$BASE"
-  MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash turbohead/surgery/convert_baseline.sh
+  MODEL="$MODEL" OUT="$BASE" CACHE="artifacts/hf_cache" bash src/turbohead/surgery/convert_baseline.sh
 else
   echo "-- baseline exists ($BASE/model.onnx); skip (FORCE=1 to rebuild)"
 fi
@@ -82,11 +85,14 @@ if [ "$ALWAYS" != 0 ]; then
   ASARG="--always-score $ROOT/always_score.npy"
 fi
 
-# dense-head baselines (the comparison points): fp32-eq, int8, int4 at two group sizes
-uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 16                 --dst "$ROOT/head16"
-uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 8  --group-size 128 --dst "$ROOT/head8g128"
-uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 4  --group-size 128 --dst "$ROOT/head4g128"
-uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 4  --group-size 32  --dst "$ROOT/head4g32"
+# dense-head baselines (the comparison points): fp32-eq, int8, int4 at two group sizes.
+# SKIP_DENSE=1 omits them (CI smoke builds only the product = the flash splices below).
+if [ "${SKIP_DENSE:-0}" != 1 ]; then
+  uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 16                 --dst "$ROOT/head16"
+  uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 8  --group-size 128 --dst "$ROOT/head8g128"
+  uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 4  --group-size 128 --dst "$ROOT/head4g128"
+  uv run turbohead-quantize-head --src "$BASE" --head "$HEAD" --bits 4  --group-size 32  --dst "$ROOT/head4g32"
+fi
 
 # flash heads: portable onnx (logits-out) + fused custom op (shortlist-out). $ASARG adds always-score.
 uv run turbohead-splice --backend onnx  --src "$BASE" --npz "$NPZ" --head "$HEAD" -P "$P" $ASARG --dst "$ROOT/onnx"

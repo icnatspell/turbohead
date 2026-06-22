@@ -17,8 +17,9 @@ items**; `docs/ORT_QUIRKS.md` records the measured ORT CPU quirks behind the pre
 ## Commands
 
 ```bash
-uv sync                                    # install (full toolkit); `dev` group adds ruff/pytest/pyrefly
-uv run ruff check turbohead/ tests/        # lint (CI gate)
+uv sync                                    # inference deps only (no torch). `dev` adds ruff/pytest/pyrefly
+uv sync --extra surgery                     # + offline toolkit (torch, genai, onnx) — needed to BUILD/TEST
+uv run ruff check src/turbohead/ tests/        # lint (CI gate)
 uv run pytest -q                           # tests; integration tests self-skip without the model artifact
 uv run pytest tests/test_select.py -q      # a single test file
 ```
@@ -28,7 +29,7 @@ tees logs; `FORCE=1` rebuilds). It runs: int4 baseline → `head_W.npy` → bala
 baselines (`turbohead-quantize-head`) → `onnx` + `fused` splices, then prints the bench/eval commands.
 
 ```bash
-bash turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b   # -> artifacts/qwen3_0_6b/{baseline,head_W.npy,clusters.npz,head{16,8g128,4g128,4g32},onnx,fused,logs}
+bash src/turbohead/surgery/build_all.sh Qwen/Qwen3-0.6B qwen3_0_6b   # -> artifacts/qwen3_0_6b/{baseline,head_W.npy,clusters.npz,head{16,8g128,4g128,4g32},onnx,fused,logs}
 ```
 
 Underlying steps (what build_all wires per-slug; console scripts map to `<module>:main`):
