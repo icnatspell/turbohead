@@ -65,6 +65,18 @@ with 100% argmax agreement. It's the same op the quantized model body uses.
 **Takeaway:** for any **static-weight** int gemv at M=1, use `MatMulNBits`, never `MatMulInteger`.
 (Note this is the static-weight case — contrast with #3, the dynamic-gather case, where it can't be used.)
 
+**Two further limits found wiring per-channel stage-1 quant:**
+- **`MatMulNBits` block_size silently caps at 256.** Correct at 128/256; at 512/1024 the MLAS CPU
+  kernel returns garbage (argmax 0% vs fp32, both `accuracy_level` 0 and 4) — no error, just wrong
+  output. So per-group can't go coarser than 256, and **true per-channel (block == contraction dim)
+  is unreachable via MatMulNBits.** `quantize_stage1` now hard-errors above 256.
+- **Per-channel int8 is a `MatMulInteger` job, not MatMulNBits.** MatMulNBits is block-wise by design;
+  the canonical ONNX per-channel path is `DynamicQuantizeLinear`(act) → `MatMulInteger` → `Mul` by the
+  per-channel weight scale (scale lives *outside* the matmul). It's correct (argmax ~98% vs fp32 at
+  one scale/centroid) but, per the takeaway above, **slower at M=1** than per-group MatMulNBits — so
+  per-channel int8 stage-1 is a strictly worse operating point here (coarser *and* slower). Built as
+  `--stage1 int8ch` to fill the benchmark matrix, not because it wins.
+
 ## 6. The O(V) `ScatterElements` is cheap; the full-vocab softmax is not
 
 **Expected:** scattering candidate logits into a `(1,V)` `-1e9` base (V≈152k) every step is costly.

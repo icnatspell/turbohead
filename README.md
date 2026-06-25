@@ -101,8 +101,9 @@ only these two flags shape inference:
 | flag | default | what it does |
 |---|---|---|
 | `-P N` | `256` | probes: how many top clusters stage 2 refines. Higher `P` lifts coverage and accuracy, costs speed |
-| `--stage1 {fp16,int8,int4}` | `int4` | centroid-scoring precision. `int4` is fastest; `fp16` reproduces the dense head exactly |
-| `--block-size N` | `128` | `MatMulNBits` quant group size for int4/int8 stage 1 (ignored for fp16) |
+| `--stage1 {fp16,int8,int8ch,int4}` | `int4` | stage-1 centroid-scoring precision. `int4`/`int8` = per-group `MatMulNBits` (`int4` fastest); `int8ch` = per-channel int8 via `MatMulInteger` (correct but slower at M=1 — per-group dominates); `fp16` reproduces the dense head exactly |
+| `--block-size N` | `128` | stage-1 per-group `MatMulNBits` group size for `int4`/`int8` (**max 256** — MLAS breaks above that; ignored for `fp16`/`int8ch`) |
+| `--head-weight-dtype {fp32,int8}` | `fp32` | stage-2 candidate-row precision. `int8` = **per-channel (per-row) symmetric int8**: in `fused` it's `FlashHeadSelectQ8` (4× less head read, dots straight from int8); in `onnx` it's int8 rows + a hoisted-scale `Mul` — portable but the `Cast` back to fp32 means it lands ~flat on CPU EP (see `docs/ORT_QUIRKS.md`) |
 
 ### Online: the decode loop
 
@@ -178,7 +179,8 @@ produce identical quality; the decode loop auto-detects which one a model uses f
 
 - **`--backend onnx` (logits-out)** — pure ONNX standard ops (`MatMulNBits` → `TopK` → `Gather` →
   matmul → `ScatterElements`), producing full `(1, V)` logits. Runs on any stock `onnxruntime`, no
-  native code. The portable path.
+  native code. The portable path. Stage-2 rows are fp32 by default; `--head-weight-dtype int8` stores
+  them per-channel int8 with a hoisted-scale `Mul` (portable, but ~flat on CPU EP — `docs/ORT_QUIRKS.md`).
 - **`--backend fused` (shortlist-out)** — same stage 1, but stage 2 collapses into a single custom CPU
   op, `turbohead::FlashHeadSelect` (`csrc/turbohead_op.cc`). The fastest path.
 

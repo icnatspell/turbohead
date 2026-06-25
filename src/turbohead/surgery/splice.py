@@ -25,7 +25,7 @@ import onnx
 from onnx import helper, TensorProto, numpy_helper
 from loguru import logger
 from turbohead.surgery.build_subgraph import (
-    stage1_nodes, onnx_stage2_nodes, fused_stage2_nodes, quantize_stage1,
+    stage1_nodes, onnx_stage2_nodes, fused_stage2_nodes, quantize_stage1, STAGE1_CHOICES,
 )
 
 # Bare-CLI defaults for the ad-hoc single-model workflow (matches convert_baseline.sh's default
@@ -109,7 +109,7 @@ def splice(src=DEFAULT_SRC, dst=None, backend="fused", P=256, stage1="int4", blo
 
     if backend == "onnx":
         s2n, s2i = onnx_stage2_nodes(Wperm, Vmap, Wspec, special_ids, P, "fh_hlast", ti1,
-                                     "fh_logits2d")
+                                     "fh_logits2d", weight_dtype=head_weight_dtype)
         nodes += s2n + [helper.make_node("Reshape", ["fh_logits2d", "fh_shp_11V"], ["logits"])]
         inits += s2i + [_i64v("fh_shp_11V", [1, 1, V])]
         # `logits` graph output already declared by the export — reused as-is (logits-out)
@@ -152,12 +152,18 @@ def main():
     ap.add_argument("--npz", default=CLUSTERS, help="clusters .npz for this model")
     ap.add_argument("--head", default=HEAD_W, help="fp32 head_W.npy for this model")
     ap.add_argument("-P", "--probes", type=int, default=256)
-    ap.add_argument("--stage1", default="int4", choices=["fp16", "int8", "int4"],
-                    help="stage-1 centroid-scoring precision (int4 default, fastest)")
-    ap.add_argument("--block-size", type=int, default=128, help="MatMulNBits quant group size")
+    ap.add_argument("--stage1", default="int4", choices=list(STAGE1_CHOICES),
+                    help="stage-1 centroid-scoring precision. int4/int8 = per-group MatMulNBits "
+                         "(int4 default, fastest); int8ch = per-channel int8 via MatMulInteger "
+                         "(correct but slower at M=1 — per-group dominates); fp16 = exact")
+    ap.add_argument("--block-size", type=int, default=128,
+                    help="stage-1 per-group MatMulNBits quant group size (int4/int8 only; max 256 — "
+                         "MLAS breaks above that. Ignored for fp16/int8ch)")
     ap.add_argument("--head-weight-dtype", default="fp32", choices=["fp32", "int8"],
-                    help="fused stage-2 weight precision (int8 = FlashHeadSelectQ8, 4x less "
-                         "head read; fused backend only)")
+                    help="stage-2 candidate-row weight precision. int8 = per-channel (per-row) int8: "
+                         "FlashHeadSelectQ8 in the fused backend (4x less head read), or int8 rows + "
+                         "hoisted-scale Mul in the onnx backend (portable, but see docs/ORT_QUIRKS.md "
+                         "— the Cast back to fp32 means it tends to land flat on CPU EP)")
     ap.add_argument("--always-score", default=None,
                     help="npy of token ids to ALWAYS score: unions them into the always-scored "
                          "specials so frequently-misrouted tokens can't be missed (~free, lifts "
