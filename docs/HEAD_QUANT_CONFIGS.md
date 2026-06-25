@@ -63,6 +63,32 @@ uv run turbohead-splice --backend fused $S --stage1 int8ch                --head
 Measure: `uv run turbohead-bench $R/cfg1 $R/cfg2 $R/cfg3 $R/cfg4 $R/cfg5 $R/cfg6 --threads 1 --reps 7`
 (one model per subprocess — two custom-op `.so` in one process segfault).
 
+## Results: Gemma3-270M (int4 body, 2026-06-25)
+
+D=640, V=262144, 18 layers → extreme head share, so flash wins big. CPU EP, 1 thread, P=256,
+`-P 256`, no `--always-score`. **Speedup vs the fp32-equivalent dense head** (`head16`, 27.2 tok/s).
+Top-1 = argmax agreement vs the true fp32 head over 1999 detokenized WikiText-2 positions.
+
+|  # | backend | 1st | 2nd | tok/s @1t | speedup | top-1 agree |
+|---:|---|---|---|---:|---:|---:|
+|  1 | onnx  | INT4g  | INT8ch | 117.5 | 4.32× | 89.1% |
+|  2 | onnx  | INT8ch | INT8ch | 108.7 | 4.00× | 90.4% |
+|  3 | onnx  | INT8ch | FP     | 116.2 | 4.27× | 93.0% |
+|  4 | fused | INT4g  | INT8ch | 157.2 | **5.78×** | 89.1% |
+|  5 | fused | INT8ch | INT8ch | 154.1 | 5.66× | 90.4% |
+|  6 | fused | INT8ch | FP     | 145.3 | 5.34× | 93.0% |
+
+Reading it:
+- **Backend dominates speed:** fused (4–6) ≈ 5.3–5.8× vs onnx (1–3) ≈ 4.0–4.3× — the custom op avoids
+  the `(P·cap, D)` gather/scatter.
+- **Stage-2 int8 only pays in fused:** fused int8 (4,5) > fused fp32 (6); but onnx int8 (1,2) ≤ onnx
+  fp32 (3) — the onnx `Cast` back to fp32 eats the saving (docs/ORT_QUIRKS.md), as predicted.
+- **Quality tracks bits, not backend:** configs 4/5/6 have identical agreement to 1/2/3 (same precision;
+  fused is byte-identical to logits-out). Stage-1 `int8ch` (8-bit) beats `int4` by ~1.3pp; stage-2 `FP`
+  beats `int8` by ~2.6pp. Best quality (cfg 6, 93.0%) costs ~8% speed vs the fastest (cfg 4, 89.1%).
+- The shipped default (int4 stage-1, fp32 stage-2, **with** `--always-score`) is 94.8% in RESULTS.md;
+  these 6 omit `--always-score`, which is why they sit a touch lower.
+
 ## Notes (docs/ORT_QUIRKS.md)
 
 - On the **onnx** backend, 2nd=INT8ch tends to land flat-to-negative on CPU EP: the `Cast` back to fp32
